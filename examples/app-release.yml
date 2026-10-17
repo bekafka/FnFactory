@@ -1,0 +1,94 @@
+# ============================================================================
+# 应用仓库侧的调用范例
+# ============================================================================
+# 放到**应用自己的仓库**：<app-repo>/.github/workflows/release.yml
+# 这就是你在自研应用仓库里唯一需要写的 CI 文件（拓扑 C 的「分散」那一半）。
+#
+# 打 tag 即发版：
+#     git tag v1.2.3 && git push origin v1.2.3
+# ============================================================================
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号（不带 v）'
+        required: true
+        type: string
+      changelog:
+        description: '更新日志'
+        required: false
+        type: string
+
+# 可复用 workflow 的权限由**调用方**决定，被调用方只能收紧。
+# 上传 Release 资产需要 contents: write。
+permissions:
+  contents: write
+
+jobs:
+  meta:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.m.outputs.version }}
+      changelog: ${{ steps.m.outputs.changelog }}
+      app_key: ${{ steps.m.outputs.app_key }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 解析版本与日志
+        id: m
+        env:
+          IN_VERSION: ${{ github.event.inputs.version }}
+          IN_CHANGELOG: ${{ github.event.inputs.changelog }}
+        run: |
+          set -euo pipefail
+          if [ -n "${IN_VERSION}" ]; then
+            VERSION="${IN_VERSION}"
+          elif [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            echo "::error::手动触发时必须填 version"; exit 1
+          fi
+
+          if [ -n "${IN_CHANGELOG}" ]; then
+            CHANGELOG="${IN_CHANGELOG}"
+          else
+            PREV=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+            if [ -n "$PREV" ]; then
+              CHANGELOG=$(git log "${PREV}..HEAD" --no-merges --pretty=format:'* %s' | head -40)
+            else
+              CHANGELOG=$(git log -n 15 --no-merges --pretty=format:'* %s')
+            fi
+            [ -n "$CHANGELOG" ] || CHANGELOG="维护与细节优化"
+          fi
+
+          # 包内 manifest 的 appname，必须逐字一致
+          APP_KEY=$(grep -oP '^appname\s*=\s*\K.*' packaging/*/manifest 2>/dev/null | head -1 | tr -d '\r')
+          [ -n "$APP_KEY" ] || { echo "::error::读不到 packaging/*/manifest 里的 appname"; exit 1; }
+
+          {
+            echo "version=${VERSION}"
+            echo "app_key=${APP_KEY}"
+            echo "changelog<<__EOF__"
+            echo "$CHANGELOG"
+            echo "__EOF__"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: meta
+    uses: bekafka/fpk-factory/.github/workflows/_build-fpk.yml@main
+    with:
+      app_key:   ${{ needs.meta.outputs.app_key }}
+      version:   ${{ needs.meta.outputs.version }}
+      changelog: ${{ needs.meta.outputs.changelog }}
+      publish:   true
+      # 单架构应用就改成只留一条：
+      # matrix: '{"include":[{"os":"ubuntu-24.04","arch":"amd64","platform":"x86"}]}'
+    secrets:
+      FNDEPOT_TOKEN: ${{ secrets.FNDEPOT_TOKEN }}

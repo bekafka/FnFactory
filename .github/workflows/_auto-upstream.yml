@@ -1,0 +1,133 @@
+name: Auto Detect Upstream Release (reusable)
+
+# 可选。这一环是「无人值守跟版」——检测上游有没有发新版，有就自动触发构建。
+#
+# 放在**应用仓库**里用（重打包上游二进制/镜像的场景）：
+#
+#   jobs:
+#     watch:
+#       uses: bekafka/fpk-factory/.github/workflows/_auto-upstream.yml@main
+#       with:
+#         upstream_repo:    'MetaCubeX/mihomo'
+#         upstream_asset_re: 'linux-(amd64|arm64)'
+#         build_workflow:   'release.yml'
+#       secrets:
+#         UPSTREAM_TOKEN: ${{ secrets.UPSTREAM_TOKEN }}
+#
+# ⚠️ 必须用 PAT，不能用 GITHUB_TOKEN：
+#    由 GITHUB_TOKEN 触发的事件**不会再生新的 workflow run**，
+#    workflow_dispatch 会静默什么都不发生。
+#
+# 记账文件放在应用仓库根，名字默认 <app_key>-upstream.json。
+
+on:
+  workflow_call:
+    inputs:
+      app_key:
+        description: '应用键名（用于记账文件名）'
+        required: true
+        type: string
+      upstream_repo:
+        description: '上游仓库 owner/repo'
+        required: true
+        type: string
+      upstream_asset_re:
+        description: '上游资产名正则；0 命中则跳过（避免拿到不可用的 release）'
+        required: false
+        type: string
+        default: ''
+      build_workflow:
+        description: '发现新版时要触发的本仓库流水线文件名'
+        required: false
+        type: string
+        default: 'release.yml'
+      build_ref:
+        description: '触发时使用的 ref'
+        required: false
+        type: string
+        default: 'main'
+    secrets:
+      UPSTREAM_TOKEN:
+        required: true
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 查询上游最新 release
+        id: up
+        env:
+          GH_TOKEN: ${{ secrets.UPSTREAM_TOKEN }}
+          REPO: ${{ inputs.upstream_repo }}
+          RE: ${{ inputs.upstream_asset_re }}
+        run: |
+          set -euo pipefail
+          # 取不到就必须报错退出，绝不能当成「上游没发新版」——
+          # 那会让这个应用被永久静默漏版，而且没人会发现。
+          if ! json=$(gh api "repos/${REPO}/releases/latest" 2>/dev/null); then
+            echo "::error::取不到 ${REPO} 的 latest release（网络或 token 问题），本次巡检作废"
+            exit 1
+          fi
+          TAG=$(echo "$json" | jq -r '.tag_name // empty')
+          [ -n "$TAG" ] || { echo "::error::上游响应里没有 tag_name"; exit 1; }
+
+          if [ -n "$RE" ]; then
+            N=$(echo "$json" | jq -r --arg re "$RE" '[.assets[].name | select(test($re))] | length')
+            if [ "$N" -eq 0 ]; then
+              echo "::warning::上游 $TAG 没有匹配 '$RE' 的资产，跳过"
+              echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
+            fi
+            echo "上游 $TAG：匹配资产 $N 个"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: 与已触发版本比对
+        id: cmp
+        if: steps.up.outputs.skip != 'true'
+        env:
+          STATE: ${{ inputs.app_key }}-upstream.json
+          LATEST: ${{ steps.up.outputs.tag }}
+        run: |
+          set -euo pipefail
+          PREV=""
+          [ -f "$STATE" ] && PREV=$(jq -r '.published_tag // empty' "$STATE" || echo "")
+          echo "上次触发：${PREV:-（无记录）}  上游最新：${LATEST}"
+          if [ "$LATEST" = "$PREV" ]; then
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 触发构建流水线
+        if: steps.cmp.outputs.needed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.UPSTREAM_TOKEN }}
+          LATEST: ${{ steps.up.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh workflow run "${{ inputs.build_workflow }}" \
+            --ref "${{ inputs.build_ref }}" \
+            -f version="${LATEST#v}" \
+            -f changelog="上游 ${LATEST} 自动跟进"
+          echo "✓ 已触发 ${{ inputs.build_workflow }}（version=${LATEST#v}）"
+
+      - name: 记账
+        if: steps.cmp.outputs.needed == 'true'
+        env:
+          STATE: ${{ inputs.app_key }}-upstream.json
+          LATEST: ${{ steps.up.outputs.tag }}
+        run: |
+          set -euo pipefail
+          printf '{\n  "published_tag": "%s",\n  "checked_at": "%s"\n}\n' \
+            "$LATEST" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$STATE"
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "$STATE"
+          git commit -m "chore: 记录上游 ${LATEST} 已触发构建"
+          git push

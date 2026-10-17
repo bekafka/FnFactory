@@ -1,0 +1,258 @@
+name: Build FPK (reusable)
+
+# 通用打包流水线。三类应用（二进制 / Node-Python / Docker）都用这一条，
+# 差异只在应用仓库里的 packaging/build.sh 产出了什么。
+#
+# 调用方式（应用仓库的 .github/workflows/release.yml）：
+#   jobs:
+#     build:
+#       permissions: { contents: write }
+#       uses: bekafka/fpk-factory/.github/workflows/_build-fpk.yml@main
+#       with:
+#         app_key:      MyApp
+#         version:      ${{ github.ref_name }}      # 或从 tag 解析
+#         changelog:    "本次更新说明"
+#         publish:      true
+#       secrets:
+#         FNDEPOT_TOKEN: ${{ secrets.FNDEPOT_TOKEN }}
+#
+# 应用仓库必须提供的契约（见 examples/）：
+#   packaging/<App>/manifest, config/, cmd/, wizard/, app/   ← fnOS 包模板
+#   packaging/build.sh                                       ← 产出产物到 $PAYLOAD_DIR
+
+on:
+  workflow_call:
+    inputs:
+      app_key:
+        description: 'fnOS 应用名，必须逐字等于包内 manifest 的 appname'
+        required: true
+        type: string
+      version:
+        description: '包版本号（写进 manifest 的 version）'
+        required: true
+        type: string
+      changelog:
+        description: '更新日志（支持中文）'
+        required: true
+        type: string
+      matrix:
+        description: '构建矩阵 JSON（含 include 数组，每项需 os/arch/platform）'
+        required: false
+        type: string
+        default: '{"include":[{"os":"ubuntu-24.04","arch":"amd64","platform":"x86"},{"os":"ubuntu-24.04-arm","arch":"arm64","platform":"arm"}]}'
+      template_dir:
+        description: '包模板所在目录（相对应用仓库根）'
+        required: false
+        type: string
+        default: 'packaging'
+      build_script:
+        description: '产出 payload 的脚本路径（相对应用仓库根）'
+        required: false
+        type: string
+        default: 'packaging/build.sh'
+      release_tag:
+        description: 'Release tag；留空则用 v<version>'
+        required: false
+        type: string
+        default: ''
+      publish:
+        description: '是否写回 FnDepot 索引'
+        required: false
+        type: boolean
+        default: true
+      fndepot_repo:
+        description: '索引仓库（分散模型：只存元数据，资产留在本仓库）'
+        required: false
+        type: string
+        default: 'bekafka/FnDepot'
+      factory_repo:
+        description: '打包厂仓库（提供 fnpack 工具）。⚠️ 若改仓库名，本文件两处必须同步改：这个默认值 + publish job 的 uses:'
+        required: false
+        type: string
+        default: 'bekafka/fpk-factory'
+    outputs:
+      tag:
+        description: '本次发布使用的 tag'
+        value: ${{ jobs.release.outputs.tag }}
+      version:
+        value: ${{ inputs.version }}
+      changelog:
+        value: ${{ inputs.changelog }}
+    secrets:
+      FNDEPOT_TOKEN:
+        description: '对索引仓库有 contents:write 的 PAT'
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  # ══════════════════════════════════════════════════════════════════
+  build:
+    name: 打包 ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(inputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: 检出应用仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 检出打包厂（提供 fnpack 工具）
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.factory_repo }}
+          ref: main
+          path: .factory
+
+      - name: 校验契约
+        run: |
+          set -euo pipefail
+          [ -d "${{ inputs.template_dir }}/${{ inputs.app_key }}" ] || {
+            echo "::error::缺少包模板目录 ${{ inputs.template_dir }}/${{ inputs.app_key }}"; exit 1; }
+          [ -f "${{ inputs.template_dir }}/${{ inputs.app_key }}/manifest" ] || {
+            echo "::error::模板里缺少 manifest"; exit 1; }
+          [ -f "${{ inputs.build_script }}" ] || {
+            echo "::error::缺少构建脚本 ${{ inputs.build_script }}"; exit 1; }
+          echo "✓ 契约完整"
+
+      - name: 校验打包规范（specs/）
+        run: |
+          set -euo pipefail
+          bash .factory/tools/lint-package.sh "${{ inputs.template_dir }}/${{ inputs.app_key }}"
+
+      - name: 准备 fnpack 工具（带 sha256 校验）
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          cp ".factory/tools/fnpack-linux-${ARCH}" ./fnpack
+          chmod +x ./fnpack
+          ACTUAL=$(sha256sum ./fnpack | awk '{print $1}')
+          EXPECTED=$(grep "fnpack-linux-${ARCH}$" .factory/tools/SHA256SUMS | awk '{print $1}')
+          if [ -n "$EXPECTED" ] && [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo "::error::fnpack 哈希不符：期望 $EXPECTED 实际 $ACTUAL"; exit 1
+          fi
+          echo "✓ fnpack sha256=$ACTUAL"
+          ./fnpack --help | head -2
+
+      - name: 组装工作区（模板 + payload）
+        env:
+          ARCH: ${{ matrix.arch }}
+          PLATFORM: ${{ matrix.platform }}
+          VERSION: ${{ inputs.version }}
+          PAYLOAD_DIR: ${{ github.workspace }}/build_workspace/${{ inputs.app_key }}/app
+        run: |
+          set -euo pipefail
+          rm -rf build_workspace && mkdir -p build_workspace
+          cp -r "${{ inputs.template_dir }}/${{ inputs.app_key }}" build_workspace/
+          mv ./fnpack build_workspace/fnpack
+          mkdir -p "$PAYLOAD_DIR"
+
+          # 由应用自己的脚本产出 payload —— 三类应用的唯一差异点就在这里
+          bash "${{ inputs.build_script }}"
+
+          echo "--- payload 内容 ---"
+          find "$PAYLOAD_DIR" -type f | head -40
+          echo "--- payload 大小 ---"
+          du -sh "$PAYLOAD_DIR"
+
+      - name: 注入 manifest 占位符
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          VERSION: ${{ inputs.version }}
+          CHANGELOG: ${{ inputs.changelog }}
+        run: |
+          set -euo pipefail
+          MANIFEST="build_workspace/${{ inputs.app_key }}/manifest"
+          # changelog 可能多行/含中文：先过 jq 转义再 sed；${XXX} 必须写成 \${XXX}
+          ESCAPED_CHANGELOG=$(printf '%s' "$CHANGELOG" | jq -sRr @json)
+          sed -i "s/\${VERSION}/${VERSION}/g"             "$MANIFEST"
+          sed -i "s/\${CHANGELOG}/${ESCAPED_CHANGELOG}/g" "$MANIFEST"
+          sed -i "s/\${PLATFORM}/${PLATFORM}/g"           "$MANIFEST"
+          echo "--- 注入后的 manifest ---"; cat "$MANIFEST"
+
+      - name: fnpack build 并规范化资产名
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          cd build_workspace
+          ./fnpack build "${{ inputs.app_key }}"
+          SRC_FPK=$(ls *.fpk | head -n1)
+          [ -n "$SRC_FPK" ] || { echo "::error::没有产出 .fpk"; exit 1; }
+          # 资产命名约定，必须与 _publish-index.yml 的 asset_pattern 对齐
+          OUT="../${{ inputs.app_key }}-${VERSION}-${PLATFORM}.fpk"
+          mv "$SRC_FPK" "$OUT"
+          ls -la "$OUT"
+
+      - name: 上传 FPK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fpk-${{ matrix.platform }}
+          path: ${{ inputs.app_key }}-${{ inputs.version }}-${{ matrix.platform }}.fpk
+          if-no-files-found: error
+
+  # ══════════════════════════════════════════════════════════════════
+  release:
+    name: 创建 Release
+    needs: build
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - name: 下载所有架构的 FPK
+        uses: actions/download-artifact@v4
+        with:
+          pattern: fpk-*
+          merge-multiple: true
+          path: dist
+
+      - name: 确定 tag
+        id: tag
+        env:
+          IN_TAG: ${{ inputs.release_tag }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -n "$IN_TAG" ]; then TAG="$IN_TAG"; else TAG="v${VERSION}"; fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG"
+
+      - name: 创建/更新 Release 并上传
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          ls -la dist
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG 已存在，覆盖资产（digest 会变，所以索引写在之后）"
+          else
+            gh release create "$TAG" --title "v${VERSION}" --notes "版本 v${VERSION}"
+          fi
+          for f in dist/*.fpk; do
+            gh release upload "$TAG" "$f" --clobber
+          done
+
+  # ══════════════════════════════════════════════════════════════════
+  publish:
+    name: 写回 FnDepot 索引
+    needs: [build, release]
+    if: ${{ inputs.publish }}
+    permissions:
+      contents: write
+    uses: bekafka/fpk-factory/.github/workflows/_publish-index.yml@main
+    with:
+      app_key:      ${{ inputs.app_key }}
+      version:      ${{ inputs.version }}
+      changelog:    ${{ inputs.changelog }}
+      release_tag:  ${{ needs.release.outputs.tag }}
+      source_repo:  ${{ github.repository }}
+      fndepot_repo: ${{ inputs.fndepot_repo }}
+    secrets:
+      FNDEPOT_TOKEN: ${{ secrets.FNDEPOT_TOKEN }}

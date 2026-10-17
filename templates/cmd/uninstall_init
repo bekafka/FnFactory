@@ -1,0 +1,12 @@
+#!/bin/bash
+# 卸载前：只记录用户选择，不动任何数据。
+# 真正的删除在 uninstall_callback（那时应用已停止、包文件已移除）。
+set -u
+
+MODE="${wizard_uninstall_mode:-keep}"
+LOG="${TRIM_TEMP_LOGFILE:-}"
+if [ -n "$LOG" ]; then
+  printf '%s - [uninstall] 用户选择：%s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$MODE" >> "$LOG" 2>/dev/null
+fi
+echo "[uninstall] 卸载方式：$MODE"
+exit 0

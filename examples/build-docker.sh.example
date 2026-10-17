@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# ============================================================================
+# 范例 ③：Docker 类 —— 这是 fnpack 的**另一种模板**（--template docker）
+# ============================================================================
+# 与前两类的根本区别：
+#   · 包内没有应用二进制，只有一个 docker-compose.yaml
+#   · 镜像在安装/启动时从 registry 拉取，所以：
+#       - 包体积最小（几 KB）
+#       - **更新镜像 ≠ 更新应用**：改了镜像 tag 才需要发新 fpk
+#       - 架构问题转移到镜像本身（基础镜像必须有 arm64 变体）
+#
+# 模板侧必须有一条资源声明（config/resource）：
+#   { "docker-project": { "path": "docker" } }
+#   path 相对于包内 app/，即 app/docker/docker-compose.yaml
+#
+# 用官方模板起手：
+#   fnpack create MyApp --template docker
+# ============================================================================
+set -euo pipefail
+
+: "${ARCH:?缺少 ARCH}"
+: "${PLATFORM:?缺少 PLATFORM}"
+: "${VERSION:?缺少 VERSION}"
+: "${PAYLOAD_DIR:?缺少 PAYLOAD_DIR}"
+
+echo "[build-docker] arch=$ARCH platform=$PLATFORM version=$VERSION"
+
+COMPOSE_SRC="${COMPOSE_SRC:-docker/docker-compose.yaml}"
+[ -f "$COMPOSE_SRC" ] || { echo "::error::找不到 compose 文件：$COMPOSE_SRC"; exit 1; }
+
+mkdir -p "$PAYLOAD_DIR/docker"
+
+# 用 VERSION 注入镜像 tag，保证「改 tag = 发新版」
+sed "s|__VERSION__|${VERSION}|g" "$COMPOSE_SRC" > "$PAYLOAD_DIR/docker/docker-compose.yaml"
+
+# 端口、数据卷等如果随架构不同，在这里分别处理：
+# if [ "$PLATFORM" = "arm" ]; then sed -i 's|image: xxx:latest|image: xxx:arm64|' "$PAYLOAD_DIR/docker/docker-compose.yaml"; fi
+
+# ── 关键自检：镜像必须真的有目标架构 ──────────────────────────────────────
+# 只发 amd64 镜像的上游，arm 设备装上去会 ImagePull 失败、容器起不来。
+# 这里先探测 manifest 是否含目标架构，缺了就**提前失败**，别等用户装完才发现。
+IMAGES=$(grep -oP '^\s*image:\s*\K\S+' "$PAYLOAD_DIR/docker/docker-compose.yaml" | sort -u || true)
+if [ -n "${IMAGES:-}" ] && command -v docker >/dev/null 2>&1; then
+  for img in $IMAGES; do
+    docker manifest inspect "$img" >/tmp/manifest.json 2>/dev/null || {
+      echo "::warning::取不到 $img 的 manifest，跳过架构校验"; continue; }
+    WANT="amd64"; [ "$ARCH" = "arm64" ] && WANT="arm64"
+    if grep -q "\"architecture\": \"$WANT\"" /tmp/manifest.json; then
+      echo "[build-docker] ✓ $img 含 $WANT"
+    else
+      echo "::error::$img 没有 $WANT 变体，该架构装上去会拉取失败"
+      exit 1
+    fi
+  done
+fi
+
+echo "[build-docker] 完成，payload："
+find "$PAYLOAD_DIR" -type f

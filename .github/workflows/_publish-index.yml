@@ -1,0 +1,231 @@
+name: Publish Index (reusable)
+
+# 写回 FnDepot 索引（分散模型：只写元数据，.fpk 资产留在应用自己的 Release）。
+#
+# 与 shuangji66/buildbot 的 Publish.yaml 相比，本模块多做了三件必要的事：
+#   ① 首次收录防呆     —— app 键不存在时直接失败，而不是静默写出缺必填字段的空壳
+#   ② platform 取并集  —— 后发架构不会被漏掉，arm 设备才看得到应用
+#   ③ verify 门禁      —— 结构不过就地失败，绝不推坏索引
+
+on:
+  workflow_call:
+    inputs:
+      app_key:
+        description: 'fnpack.json 里的应用键名（== 包内 manifest 的 appname）'
+        required: true
+        type: string
+      version:
+        description: 'manifest 版本号'
+        required: true
+        type: string
+      changelog:
+        description: '更新日志（支持中文）'
+        required: true
+        type: string
+      release_tag:
+        description: '承载 .fpk 资产的 Release tag'
+        required: true
+        type: string
+      source_repo:
+        description: '承载 Release 的仓库 owner/repo'
+        required: true
+        type: string
+      fndepot_repo:
+        description: '索引仓库'
+        required: false
+        type: string
+        default: 'bekafka/FnDepot'
+      asset_pattern:
+        description: '资产名模板，支持 {app} {version} {arch}'
+        required: false
+        type: string
+        default: '{app}-{version}-{arch}.fpk'
+    secrets:
+      FNDEPOT_TOKEN:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: 写入 FnDepot 索引
+    runs-on: ubuntu-24.04
+    steps:
+      - name: 检出索引仓库
+        env:
+          TOKEN: ${{ secrets.FNDEPOT_TOKEN }}
+          REPO: ${{ inputs.fndepot_repo }}
+        run: |
+          set -euo pipefail
+          git clone --depth 1 "https://x-access-token:${TOKEN}@github.com/${REPO}.git" fndepot
+          cd fndepot
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          echo "索引仓库当前提交：$(git rev-parse --short HEAD)"
+
+      # ── ① 防呆：应用级元数据必须先存在 ──────────────────────────────
+      # 裸 jq 赋值在 app 键不存在时会造出只含 releases 的空壳，
+      # 缺 display_name/categories/platform/... 会让客户端静默跳过该应用且不报错。
+      - name: 校验应用键已存在
+        env:
+          APP: ${{ inputs.app_key }}
+        run: |
+          set -euo pipefail
+          cd fndepot
+          if ! jq -e --arg a "$APP" '.apps[$a]' fnpack.json > /dev/null; then
+            echo "::error::fnpack.json 里没有应用键 '$APP'"
+            echo "首次收录请先在 FnDepot 仓库执行："
+            echo "    python3 tools/add-app.py <应用仓库链接> -c <分类> --write"
+            echo "然后再重跑本流水线。"
+            echo "（直接写入会造出缺必填字段的空壳，客户端会静默跳过该应用）"
+            exit 1
+          fi
+          echo "✓ 应用键 '$APP' 已存在"
+          jq --arg a "$APP" '{platform: .apps[$a].platform, releases: (.apps[$a].releases | keys)}' fnpack.json
+
+      - name: 读取 Release 资产并计算 sha256 / size
+        id: assets
+        env:
+          GH_TOKEN: ${{ secrets.FNDEPOT_TOKEN }}
+          SRC_REPO: ${{ inputs.source_repo }}
+          TAG: ${{ inputs.release_tag }}
+          APP: ${{ inputs.app_key }}
+          VERSION: ${{ inputs.version }}
+          PATTERN: ${{ inputs.asset_pattern }}
+        run: |
+          set -euo pipefail
+
+          assets_json=$(gh api "repos/${SRC_REPO}/releases/tags/${TAG}" --jq '.assets')
+          if [ -z "$assets_json" ] || [ "$assets_json" = "null" ]; then
+            echo "::error::取不到 ${SRC_REPO} 的 Release ${TAG} 资产"
+            exit 1
+          fi
+
+          PACKAGES='{}'
+          ARCHES='[]'
+          FOUND=0
+
+          for arch in x86 arm all; do
+            name="${PATTERN//\{arch\}/$arch}"
+            name="${name//\{app\}/$APP}"
+            name="${name//\{version\}/$VERSION}"
+
+            info=$(echo "$assets_json" | jq --arg n "$name" '.[] | select(.name == $n) | {size, digest}')
+            if [ -z "$info" ] || [ "$info" = "null" ]; then
+              echo "ℹ️  未找到 $name，跳过"
+              continue
+            fi
+
+            digest=$(echo "$info" | jq -r '.digest')
+            if [ -z "$digest" ] || [ "$digest" = "null" ]; then
+              echo "::error::$name 缺少 digest，无法写 sha256（客户端会拒装）"
+              exit 1
+            fi
+
+            sha256="${digest#sha256:}"
+            size=$(echo "$info" | jq -r '.size')
+            url="https://github.com/${SRC_REPO}/releases/download/${TAG}/${name}"
+
+            echo "✓ $name  sha256=${sha256:0:12}…  size=${size}"
+            PACKAGES=$(echo "$PACKAGES" | jq \
+              --arg arch "$arch" --arg url "$url" --arg sha "$sha256" --argjson size "$size" \
+              '.[$arch] = {download_url: $url, sha256: $sha, size: $size}')
+            ARCHES=$(echo "$ARCHES" | jq --arg arch "$arch" '. + [$arch]')
+            FOUND=$((FOUND + 1))
+          done
+
+          if [ "$FOUND" -eq 0 ]; then
+            echo "::error::没有匹配到任何 .fpk 资产（试过 x86 / arm / all）"
+            exit 1
+          fi
+
+          {
+            echo "packages=$PACKAGES"
+            echo "arches=$ARCHES"
+          } >> "$GITHUB_OUTPUT"
+          echo "共匹配 $FOUND 个架构"
+
+      # ── ② 写版本节点 + platform 取并集 ──────────────────────────────
+      - name: 写入 releases.<version>
+        env:
+          APP: ${{ inputs.app_key }}
+          VERSION: ${{ inputs.version }}
+          CHANGELOG: ${{ inputs.changelog }}
+          PACKAGES: ${{ steps.assets.outputs.packages }}
+          ARCHES: ${{ steps.assets.outputs.arches }}
+        run: |
+          set -euo pipefail
+          cd fndepot
+          UPDATED_AT=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+
+          # packages 必须是嵌套字段 {changelog, updated_at, packages:{arch:{...}}}
+          jq --arg a "$APP" --arg v "$VERSION" --arg cl "$CHANGELOG" \
+             --arg t "$UPDATED_AT" --argjson pkgs "$PACKAGES" \
+             '.apps[$a].releases[$v] = {changelog: $cl, updated_at: $t, packages: $pkgs}' \
+             fnpack.json > fnpack.json.tmp && mv fnpack.json.tmp fnpack.json
+
+          # platform 取并集（platform==["all"] 时保持 all）
+          jq --arg a "$APP" --argjson archs "$ARCHES" '
+              .apps[$a].platform =
+                (if ((.apps[$a].platform // []) == ["all"]) then ["all"]
+                 else (((.apps[$a].platform // []) + $archs) | unique) end)' \
+             fnpack.json > fnpack.json.tmp && mv fnpack.json.tmp fnpack.json
+
+          echo "--- 写入后的节点 ---"
+          jq --arg a "$APP" '.apps[$a] | {platform, releases: (.releases | keys)}' fnpack.json
+
+      # ── ③ README 收录表同步（verify.py 会校验表里的版本 == max(releases)）──
+      - name: 同步 README 收录表
+        env:
+          APP: ${{ inputs.app_key }}
+        run: |
+          set -euo pipefail
+          cd fndepot
+          python3 - "$APP" <<'PY'
+          import json, re, sys
+          app = sys.argv[1]
+          idx = json.load(open("fnpack.json", encoding="utf-8"))
+          node = idx["apps"][app]
+          releases = node.get("releases") or {}
+          latest = max(releases) if releases else ""
+          plats = node.get("platform") or []
+          arch_disp = "all" if plats == ["all"] else " / ".join(sorted(plats))
+
+          path = "README.md"
+          txt = open(path, encoding="utf-8").read()
+          pat = re.compile(r"^(\|\s*[^|]*?\s*\|\s*`" + re.escape(app) + r"`\s*\|\s*)([0-9][^|]*?)(\s*\|\s*)([^|]*?)(\s*\|)", re.M)
+          m = pat.search(txt)
+          if not m:
+              print(f"README 收录表里没有 `{app}`，跳过")
+              sys.exit(0)
+          new = m.group(1) + latest + m.group(3) + arch_disp + m.group(5)
+          open(path, "w", encoding="utf-8").write(txt[:m.start()] + new + txt[m.end():])
+          print(f"README: `{app}` → 版本 {latest}，架构 {arch_disp}")
+          PY
+          git --no-pager diff --stat
+
+      # ── ④ 门禁 ──────────────────────────────────────────────────────
+      - name: verify.py 门禁
+        run: |
+          set -euo pipefail
+          cd fndepot
+          python3 tools/verify.py --no-net
+
+      - name: 提交并推送
+        env:
+          TOKEN: ${{ secrets.FNDEPOT_TOKEN }}
+          REPO: ${{ inputs.fndepot_repo }}
+          APP: ${{ inputs.app_key }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          cd fndepot
+          git add fnpack.json README.md
+          if git diff --staged --quiet; then
+            echo "索引无变化，跳过推送"; exit 0
+          fi
+          git commit -m "chore: ${APP} 更新到 ${VERSION}"
+          BRANCH=$(git rev-parse --abbrev-ref HEAD)
+          git push "https://x-access-token:${TOKEN}@github.com/${REPO}.git" "$BRANCH"
+          echo "✓ 已推送 ${REPO}@${BRANCH}: $(git rev-parse --short HEAD)"

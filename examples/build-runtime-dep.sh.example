@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# ============================================================================
+# 范例 ②：依赖系统运行时（Node.js / Python）—— 仍然属于 native 模板
+# ============================================================================
+# 关键点：**不要自己打包 Node/Python 运行时**。
+#   飞牛官方自带的运行时，在 manifest 里声明依赖即可：
+#       install_dep_apps=nodejs_v24      # Node.js v24（官方，distributor=fnos）
+#       install_dep_apps=python312       # Python 3.12（官方）
+#   已验证：nodejs_v24 装在 /var/apps/nodejs_v24，distributor=fnos，vendor 是 fnnas.com
+#
+# 生命周期脚本里必须先注入 PATH，否则会落到系统自带的旧版本：
+#   export PATH=/var/apps/nodejs_v24/target/bin:$PATH
+#
+# 本脚本只负责：把「你自己的代码」放进 payload。运行时由系统提供。
+# ============================================================================
+set -euo pipefail
+
+: "${ARCH:?缺少 ARCH}"
+: "${PLATFORM:?缺少 PLATFORM}"
+: "${VERSION:?缺少 VERSION}"
+: "${PAYLOAD_DIR:?缺少 PAYLOAD_DIR}"
+
+echo "[build-runtime-dep] arch=$ARCH platform=$PLATFORM version=$VERSION"
+
+# ── 方案 A：Node.js 应用 ───────────────────────────────────────────────────
+# 在 CI 的 ubuntu runner 上装依赖并构建；产物是纯 JS，与架构无关，
+# 所以两个架构可以跑同一份产物（除非你有原生模块 .node）。
+if [ -f package.json ]; then
+  npm ci
+  npm run build --if-present
+
+  mkdir -p "$PAYLOAD_DIR/server"
+  cp -r dist/. "$PAYLOAD_DIR/server/" 2>/dev/null || cp -r . "$PAYLOAD_DIR/server/"
+  cp package.json "$PAYLOAD_DIR/server/" 2>/dev/null || true
+
+  # 生产依赖：要与构建机架构一致的话，在矩阵里各自跑一次就行（本脚本已经如此）
+  if [ -d node_modules ]; then
+    # 只带生产依赖，砍掉 devDependencies
+    npm prune --omit=dev
+    cp -r node_modules "$PAYLOAD_DIR/server/node_modules"
+  fi
+fi
+
+# ── 方案 B：Python 应用 ────────────────────────────────────────────────────
+if [ -f requirements.txt ]; then
+  # 注意：不要在构建机上 pip install 出 .so —— 除非矩阵里的架构与目标一致。
+  # 纯 Python 的包直接带源码，由设备上的 python312 venv 安装最稳。
+  # 这里只搬运源码与依赖清单，真正的依赖安装在 cmd/install_callback 里做：
+  #   export PATH=/var/apps/python312/target/bin:$PATH
+  #   python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+  mkdir -p "$PAYLOAD_DIR/server"
+  cp -r app/. "$PAYLOAD_DIR/server/" 2>/dev/null || true
+  cp requirements.txt "$PAYLOAD_DIR/server/" 2>/dev/null || true
+fi
+
+# ── 静态前端（可选）────────────────────────────────────────────────────────
+# mkdir -p "$PAYLOAD_DIR/ui"
+# cp -r frontend/dist/. "$PAYLOAD_DIR/ui/"
+
+echo "[build-runtime-dep] 完成：$(find "$PAYLOAD_DIR" -type f | wc -l) 个文件"
+echo "[build-runtime-dep] ⚠ 别忘了在 manifest 里写 install_dep_apps=nodejs_v24 或 python312"

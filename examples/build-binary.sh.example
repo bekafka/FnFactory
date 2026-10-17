@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# ============================================================================
+# 范例 ①：二进制类（Go / Rust / C / 单文件可执行）
+# ============================================================================
+# 契约（由 _build-fpk.yml 传入）：
+#   ARCH        amd64 | arm64
+#   PLATFORM    x86 | arm
+#   VERSION     包版本
+#   PAYLOAD_DIR 产物必须落在这里（会被整体拷进模板的 app/ 目录）
+#   REPO_ROOT   应用仓库根目录，也是当前工作目录
+#
+# 要产出什么：把最终要进包的文件放进 $PAYLOAD_DIR。
+#   想让文件出现在包内 app/bin/foo  → 写 $PAYLOAD_DIR/bin/foo
+#   想让文件出现在包内 app/ui/      → 写 $PAYLOAD_DIR/ui/
+#
+# 放进 app/ 的文件在安装时由 cmd/install_callback 决定去向；
+# 或者干脆直接放 app/bin/ 让它随包解压就位（看你模板怎么写）。
+# ============================================================================
+set -euo pipefail
+
+: "${ARCH:?缺少 ARCH}"
+: "${PLATFORM:?缺少 PLATFORM}"
+: "${VERSION:?缺少 VERSION}"
+: "${PAYLOAD_DIR:?缺少 PAYLOAD_DIR}"
+
+echo "[build-binary] arch=$ARCH platform=$PLATFORM version=$VERSION"
+
+# ── 1. 编译 ────────────────────────────────────────────────────────────────
+# Go：纯 Go 项目直接交叉编译，不需要 sysroot。带 CGO 就必须换真机或矩阵。
+GOOS=linux GOARCH="$ARCH" CGO_ENABLED=0 \
+  go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
+  -o "$PAYLOAD_DIR/bin/myapp" ./cmd/myapp
+
+# Rust 写法（二选一）：
+#   rustup target add "${ARCH}-unknown-linux-musl"
+#   cargo build --release --target "${ARCH}-unknown-linux-musl"
+#   cp "target/${ARCH}-unknown-linux-musl/release/myapp" "$PAYLOAD_DIR/bin/myapp"
+
+chmod 755 "$PAYLOAD_DIR/bin/myapp"
+
+# ── 2. 架构自检（一定要做：拿错架构的二进制装到设备上会直接起不来）──────────
+ACTUAL_ARCH=$(file -b "$PAYLOAD_DIR/bin/myapp" | grep -oE 'x86-64|aarch64|ARM aarch64' | head -1)
+case "$ARCH" in
+  amd64) EXPECT="x86-64" ;;
+  arm64) EXPECT="aarch64" ;;
+esac
+if ! file -b "$PAYLOAD_DIR/bin/myapp" | grep -q "$EXPECT"; then
+  echo "::error::产物架构不对：期望 $EXPECT，实际 $ACTUAL_ARCH"
+  exit 1
+fi
+echo "[build-binary] ✓ 架构自检通过（$EXPECT）"
+
+# ── 3. 附带资源（按需）────────────────────────────────────────────────────
+# mkdir -p "$PAYLOAD_DIR/ui"
+# cp -r frontend/dist/. "$PAYLOAD_DIR/ui/"
+# curl -fsSL -o "$PAYLOAD_DIR/geoip.dat" https://example.com/geoip.dat
+
+echo "[build-binary] 完成：$(find "$PAYLOAD_DIR" -type f | wc -l) 个文件"

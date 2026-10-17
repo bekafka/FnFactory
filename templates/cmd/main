@@ -1,0 +1,276 @@
+#!/bin/bash
+# ==============================================================================
+# @APPNAME@ · 生命周期入口（start / stop / status）
+#
+# 由 fpk-factory 规范模板生成：specs/lifecycle.md
+# 占位符由 tools/scaffold-lifecycle.sh 替换；替换后请过一遍「应用定制区」。
+#
+# 这个骨架解决的都是飞牛上实测踩过的坑，别随手删：
+#   · pid 身份要校验（/proc/<pid>/exe 两边 readlink -f 再比），否则 TRIM_APPDEST
+#     的软链/真实路径差异会把"正在跑"误判成"没在跑"。
+#   · 孤儿兜底不要用 `pgrep -x node`：飞牛上 node 的 comm 是 "MainThread"，
+#     一个都匹配不到。一律遍历 /proc 比对 exe。
+#   · 就绪判据用应用自己的健康端点，端口现读配置（用户可能改过）。
+#   · 启动失败要回收自己拉起的进程，不留半状态。
+# ==============================================================================
+set -u
+
+# ── 应用定制区（scaffold 会替换；也能手工填） ─────────────────────────────────
+APPNAME="@APPNAME@"
+PREFIX="@PREFIX@"                 # 配置变量前缀：${PREFIX}_PORT / ${PREFIX}_FIX_PERMISSIONS …
+MODE="@MODE@"                     # entry（解释器+脚本）| binary（包内自带可执行文件）
+ENTRY="@ENTRY@"                   # MODE=entry 时的入口文件（相对 APPDEST）；binary 填空
+LAUNCH_CMD='@LAUNCH@'             # 真正拉起进程的命令（在 APPDEST 下用 bash -c 执行）
+OWN_BINS="@OWN_BINS@"             # 包内自有二进制（相对 APPDEST，空格分隔），孤儿清理按 exe 精确匹配
+HEALTH_PATH="@HEALTH_PATH@"       # 就绪探测路径，例如 /healthz；空 = 只探测端口
+DEFAULT_PORT="@DEFAULT_PORT@"     # 端口默认值（不要用 8080/8000 这类热门端口）
+NODE_BIN="/var/apps/nodejs_v24/target/bin/node"   # MODE=binary 时忽略
+
+# ── 路径 ─────────────────────────────────────────────────────────────────────
+PKGVAR="${TRIM_PKGVAR:-/var/apps/$APPNAME/var}"
+APPDEST="${TRIM_APPDEST:-/var/apps/$APPNAME/target}"
+LOG_FILE="$PKGVAR/info.log"
+PID_FILE="$PKGVAR/app.pid"
+PERM_FIX_PID="$PKGVAR/perm-fix.pid"
+CONF="$PKGVAR/config.env"
+READY_TIMEOUT=45
+
+mkdir -p "$PKGVAR" 2>/dev/null || true
+
+log_msg() { printf '%s - %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" >> "$LOG_FILE"; }
+resolve_path() { readlink -f "$1" 2>/dev/null || printf '%s' "$1"; }
+check_process() { [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null; }
+
+# 读配置：先给默认值，再让 config.env 覆盖（安装/设置回调写的就是它）
+load_config() {
+  local v
+  v="${PREFIX}_PORT";     PORT="${!v:-$DEFAULT_PORT}"
+  v="${PREFIX}_FIX_PERMISSIONS"; FIX_PERMISSIONS="${!v:-1}"
+  v="${PREFIX}_PERM_FIX_INTERVAL"; PERM_FIX_INTERVAL="${!v:-30}"
+  v="${PREFIX}_SAVE_DIRS"; SAVE_DIRS="${!v:-}"
+  v="${PREFIX}_LOG_MAX_BYTES"; LOG_MAX_BYTES="${!v:-5242880}"
+  v="${PREFIX}_MAX_OLD_SPACE"; MAX_OLD_SPACE="${!v:-512}"
+  if [ -r "$CONF" ]; then
+    # shellcheck disable=SC1090
+    . "$CONF"
+    PORT="${!v:-$PORT}"   # config.env 里可能没写全，保留上面的默认
+  else
+    log_msg "缺少 $CONF（install_callback 没跑？），使用内置默认值"
+  fi
+}
+
+# 应用自己的环境变量都放这里（PATH / DATA_DIR / HOME / TMPDIR …）
+build_env() {
+  load_config
+  export PATH="/var/apps/nodejs_v24/target/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  export HOME="$PKGVAR/home"
+  export TMPDIR="$PKGVAR/tmp"
+  export "@PREFIX@_DATA_DIR=$PKGVAR/data"
+  # TODO(app-env): 在这里追加应用需要的 export（数据目录、HOME、端口变量…）
+}
+
+mkdir_runtime_dirs() {
+  mkdir -p "$PKGVAR/data" "$PKGVAR/tmp" "$PKGVAR/home" 2>/dev/null || true
+  [ -n "${SAVE_DIRS:-}" ] && mkdir -p $SAVE_DIRS 2>/dev/null || true
+}
+
+# ── 身份校验：exe 归一化后等于预期，且（entry 模式）cwd 与入口都对得上 ─────────
+check_identity() {
+  local pid="$1" exe want cmd cwd
+  [ -r "/proc/$pid/exe" ] || return 1
+  exe="$(resolve_path "$(readlink "/proc/$pid/exe" 2>/dev/null)")"
+  if [ "$MODE" = "binary" ]; then
+    want="$(resolve_path "$APPDEST/${OWN_BINS%% *}")"
+    [ -n "$exe" ] && [ "$exe" = "$want" ] || return 1
+    cmd="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)"
+    case "$cmd" in *"$APPDEST"*) return 0 ;; *) return 1 ;; esac
+  else
+    want="$(resolve_path "$NODE_BIN")"
+    [ -n "$exe" ] && [ "$exe" = "$want" ] || return 1
+    cwd="$(resolve_path "$(readlink "/proc/$pid/cwd" 2>/dev/null)")"
+    [ "$cwd" = "$(resolve_path "$APPDEST")" ] || return 1
+    cmd="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)"
+    case "$cmd" in *"$ENTRY"*) return 0 ;; *) return 1 ;; esac
+  fi
+}
+
+# 孤儿兜底：遍历 /proc 按 exe 精确匹配（不用 pgrep，见文件头）
+find_orphans() {
+  local pid exe want own
+  for pid in $(ls /proc 2>/dev/null | grep -E '^[0-9]+$'); do
+    [ "$pid" = "$$" ] && continue
+    [ -r "/proc/$pid/exe" ] || continue
+    exe="$(resolve_path "$(readlink "/proc/$pid/exe" 2>/dev/null)")"
+    [ -n "$exe" ] || continue
+    if [ "$MODE" = "binary" ]; then
+      for own in $OWN_BINS; do
+        [ "$exe" = "$(resolve_path "$APPDEST/$own")" ] && { printf '%s\n' "$pid"; break; }
+      done
+    else
+      [ "$exe" = "$(resolve_path "$NODE_BIN")" ] || continue
+      check_identity "$pid" && printf '%s\n' "$pid"
+    fi
+  done
+}
+
+port_in_use() { ss -ltn 2>/dev/null | grep -qE "[:.]$1[[:space:]]"; }
+
+wait_ready() {
+  local pid="$1" waited=0
+  while [ "$waited" -lt "$READY_TIMEOUT" ]; do
+    check_process "$pid" || { log_msg "进程在启动窗口内退出（见 $LOG_FILE）"; return 1; }
+    if [ -n "$HEALTH_PATH" ] && command -v curl >/dev/null 2>&1 \
+       && curl -fsS -m 2 "http://127.0.0.1:$PORT$HEALTH_PATH" >/dev/null 2>&1; then
+      log_msg "就绪（${waited}s）port=$PORT"; return 0
+    fi
+    if [ -z "$HEALTH_PATH" ] && port_in_use "$PORT"; then
+      log_msg "端口已监听（${waited}s）port=$PORT"; return 0
+    fi
+    sleep 1; waited=$((waited + 1))
+  done
+  log_msg "等待 ${READY_TIMEOUT}s 仍未就绪"; return 1
+}
+
+# ── 日志轮转：超过上限就留一份 .1 ────────────────────────────────────────────
+rotate_logs() {
+  local size
+  [ -f "$LOG_FILE" ] || return 0
+  size="$(stat -c%s "$LOG_FILE" 2>/dev/null || echo 0)"
+  [ "${size:-0}" -le "${LOG_MAX_BYTES:-5242880}" ] && return 0
+  mv -f "$LOG_FILE" "$LOG_FILE.1" 2>/dev/null || : > "$LOG_FILE"
+  : > "$LOG_FILE"
+  log_msg "日志已轮转（> ${LOG_MAX_BYTES:-5242880} 字节），上一份保留为 info.log.1"
+}
+
+# ── 用户数据目录权限修正 ─────────────────────────────────────────────────────
+# 飞牛 data-share 的权限层会把应用新建的文件强制成 0700（umask 无效，chmod 有效），
+# 结果同机其他应用用户读不了。启动修一遍 + 跟随服务存活轮询修新文件。
+fix_permissions_once() {
+  [ "${FIX_PERMISSIONS:-1}" = "1" ] || return 0
+  [ -n "${SAVE_DIRS:-}" ] || return 0
+  local d
+  for d in $SAVE_DIRS; do
+    [ -d "$d" ] || continue
+    find "$d" -xdev -type d ! -perm -o+rx -exec chmod 0755 {} + 2>/dev/null || true
+    find "$d" -xdev -type f ! -perm -o+r -exec chmod 0644 {} + 2>/dev/null || true
+  done
+}
+
+start_permission_fixer() {
+  local server_pid="$1" interval="${PERM_FIX_INTERVAL:-30}"
+  [ "${FIX_PERMISSIONS:-1}" = "1" ] && [ -n "${SAVE_DIRS:-}" ] || return 0
+  fix_permissions_once
+  (
+    while kill -0 "$server_pid" 2>/dev/null; do
+      sleep "$interval"
+      kill -0 "$server_pid" 2>/dev/null || break
+      fix_permissions_once
+    done
+  ) >/dev/null 2>&1 &
+  printf '%s' "$!" > "$PERM_FIX_PID"
+  log_msg "用户数据目录权限修正已启动（每 ${interval}s）"
+}
+
+stop_permission_fixer() {
+  [ -r "$PERM_FIX_PID" ] || return 0
+  local pid; pid="$(head -n 1 "$PERM_FIX_PID" | tr -d '[:space:]')"
+  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && kill -TERM "$pid" 2>/dev/null
+  rm -f "$PERM_FIX_PID"
+}
+
+# ── 首次启动的默认值（例如语言、主题）────────────────────────────────────────
+# 上游若没有对应的环境变量，就走它自己的 RPC/配置文件写一次，并落 marker 只做一次：
+# 用户以后自己改不会被覆盖，卸载重装也不会重置。
+init_first_run_defaults() {
+  local marker="$PKGVAR/.first-run-done"
+  [ -f "$marker" ] && return 0
+  # TODO(first-run): 应用特有的首启初始化（没有就删掉这段，marker 仍会写）
+  printf '%s\n' "$(date '+%Y-%m-%d %H:%M:%S')" > "$marker" 2>/dev/null || true
+}
+
+# ── start / stop / status ────────────────────────────────────────────────────
+start_process() {
+  local pid
+  if [ -r "$PID_FILE" ]; then
+    pid="$(head -n 1 "$PID_FILE" | tr -d '[:space:]')"
+    if check_process "$pid" && check_identity "$pid"; then
+      log_msg "已在运行（pid=$pid）"; return 0
+    fi
+    rm -f "$PID_FILE"
+  fi
+
+  build_env
+  mkdir_runtime_dirs
+  rotate_logs
+
+  if [ "$MODE" = "binary" ]; then
+    [ -x "$APPDEST/${OWN_BINS%% *}" ] || { log_msg "找不到可执行文件 $APPDEST/${OWN_BINS%% *}"; return 1; }
+  else
+    [ -f "$APPDEST/$ENTRY" ] || { log_msg "找不到入口 $APPDEST/$ENTRY"; return 1; }
+    [ -x "$NODE_BIN" ] || { log_msg "找不到运行时 $NODE_BIN"; return 1; }
+  fi
+
+  if port_in_use "$PORT"; then
+    log_msg "端口 $PORT 已被占用；启动会失败。占用者：$(ss -ltnp 2>/dev/null | grep -E "[:.]$PORT[[:space:]]" | head -n 1)"
+  fi
+
+  (
+    cd "$APPDEST" || exit 1
+    eval "$LAUNCH_CMD"
+  ) >> "$LOG_FILE" 2>&1 &
+  pid=$!
+  printf '%s' "$pid" > "$PID_FILE"
+
+  if wait_ready "$pid"; then
+    init_first_run_defaults
+    start_permission_fixer "$pid"
+    return 0
+  fi
+
+  log_msg "启动失败，回收本次拉起的进程"
+  kill -TERM "$pid" 2>/dev/null
+  sleep 2
+  check_process "$pid" && kill -KILL "$pid" 2>/dev/null
+  for opid in $(find_orphans); do kill -TERM "$opid" 2>/dev/null; done
+  rm -f "$PID_FILE"
+  return 1
+}
+
+stop_process() {
+  local pid waited=0
+  stop_permission_fixer
+  if [ -r "$PID_FILE" ]; then
+    pid="$(head -n 1 "$PID_FILE" | tr -d '[:space:]')"
+    if check_process "$pid" && check_identity "$pid"; then
+      log_msg "停止 pid=$pid"
+      kill -TERM "$pid" 2>/dev/null
+      while [ "$waited" -lt 15 ] && check_process "$pid"; do sleep 1; waited=$((waited + 1)); done
+      check_process "$pid" && { log_msg "TERM 无效，发送 KILL"; kill -KILL "$pid" 2>/dev/null; }
+    fi
+    rm -f "$PID_FILE"
+  fi
+  for pid in $(find_orphans); do
+    log_msg "清理孤儿进程 pid=$pid"
+    kill -TERM "$pid" 2>/dev/null
+  done
+  sleep 1
+  for pid in $(find_orphans); do kill -KILL "$pid" 2>/dev/null; done
+  return 0
+}
+
+status_process() {
+  local pid
+  if [ -r "$PID_FILE" ]; then
+    pid="$(head -n 1 "$PID_FILE" | tr -d '[:space:]')"
+    if check_process "$pid" && check_identity "$pid"; then return 3; fi
+  fi
+  for pid in $(find_orphans); do return 3; done
+  return 1
+}
+
+case "${1:-}" in
+  start)  start_process ;;
+  stop)   stop_process ;;
+  status) status_process ;;
+  *)      echo "usage: $0 {start|stop|status}"; exit 2 ;;
+esac
