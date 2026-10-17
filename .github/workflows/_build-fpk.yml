@@ -124,11 +124,13 @@ jobs:
           bash .factory/tools/lint-package.sh "${{ inputs.template_dir }}/${{ inputs.app_key }}"
 
       - name: 准备 fnpack 工具（带 sha256 校验）
-        env:
-          ARCH: ${{ matrix.arch }}
         run: |
           set -euo pipefail
-          cp ".factory/tools/fnpack-linux-${ARCH}" ./fnpack
+          # 注意：fnpack 的宿主架构与包内产物架构无关（只做 tar/打包，不执行包内文件），
+          # 但官方只发布了 amd64 1.2.3；设备自带的 arm64 1.2.4 会拒绝
+          # "x.y.z-beta.N" 这类版本号（要求 x.y.z[-r]，r 是整数）。
+          # 因此统一用 amd64 1.2.3 打包，两个架构都过。
+          cp ".factory/tools/fnpack-linux-amd64" ./fnpack
           chmod +x ./fnpack
           ACTUAL=$(sha256sum ./fnpack | awk '{print $1}')
           EXPECTED=$(grep "fnpack-linux-${ARCH}$" .factory/tools/SHA256SUMS | awk '{print $1}')
