@@ -43,29 +43,30 @@
 
 ---
 
-## 接入一个新应用（4 步）
-
 ## 打包规范（`specs/`）—— 踩过的坑，别再踩
 
 工厂除了流水线，还沉淀了一套**规范 + 可继承模板**。新应用接入前先读，写脚本时直接拷模板：
 
 | 规范 | 管什么 | 模板 |
 |---|---|---|
+| [`specs/authorship.md`](specs/authorship.md) | **三个作者**：开发者 / 发布者 / **源作者**（上游项目最初的创造者与权利源头）——写在哪六处、怎么校验 | `templates/manifest` |
 | [`specs/uninstall.md`](specs/uninstall.md) | 卸载向导（**保留配置 / 完全卸载**）、`purge` 路径护栏、日志落点 | `templates/wizard/uninstall`、`templates/cmd/uninstall_*` |
 | [`specs/lifecycle.md`](specs/lifecycle.md) | `cmd/main`：pid 身份校验、孤儿清扫（**别用 `pgrep -x node`**）、就绪判据、日志轮转、用户数据目录权限、首启默认值、内存上限 | `templates/cmd/main` |
 | [`specs/acceptance.md`](specs/acceptance.md) | 六阶验收：状态 / 端点 / 鉴权 / 端到端 / 生命周期 / 运维项 | `templates/tests/accept.sh` |
 | [`specs/pitfalls.md`](specs/pitfalls.md) | 飞牛平台坑位：权限层覆盖 ACL、`data-share` 强制 `0700`、`comm=MainThread`、`releases/latest` 抓不到预发布… | — |
 
-两条硬约束（CI 里会拦）：
+三条硬约束（CI 里会拦）：
 
 1. **有持久化数据的应用必须给卸载方式选择**，默认 `keep`，`purge` 必须有 `/vol1/@appdata/*` 路径护栏；
-2. **`cmd/main` 必须做 `/proc/<pid>/exe` 身份校验**、不得用 `pgrep -x node` 做孤儿清扫。
+2. **`cmd/main` 必须做 `/proc/<pid>/exe` 身份校验**、不得用 `pgrep -x node` 做孤儿清扫；
+3. **三个作者必须写清**：`maintainer`/`distributor` 写 bekafka，`source_author`/`source_author_url`
+   写上游项目最初的创造者与权利源头（见 [`specs/authorship.md`](specs/authorship.md)）。
 
 ### 一键继承
 
 ```bash
 本仓库 tools/scaffold-lifecycle.sh \
-  --pkg-dir packaging/MyApp --app MyApp --prefix MYAPP --port 26800 \
+  --pkg-dir apps/MyApp/package --app MyApp --prefix MYAPP --port 26800 \
   --health /healthz --mode entry --entry dist/server/index.mjs \
   --launch 'exec "$NODE_BIN" --max-old-space-size="${MAX_OLD_SPACE:-512}" "$ENTRY"' \
   --own-bins 'bin/helper' \
@@ -79,11 +80,11 @@
 ### 规范门禁
 
 ```bash
-tools/lint-package.sh packaging/MyApp      # 本地跑；CI 的「校验打包规范」步骤跑同一条
+tools/lint-package.sh apps/MyApp/package      # 本地跑；CI 的「校验打包规范」步骤跑同一条
 ```
 
 它检查的是**规范里写成硬性要求**的部分（必需文件、脚本语法、keep 默认、路径护栏、向导结构、
-`/proc` 身份校验、热门端口默认值…）。门禁不是为了卡人，是为了让规范不至于只活在文档里。
+`/proc` 身份校验、热门端口默认值、**三个作者字段**…）。门禁不是为了卡人，是为了让规范不至于只活在文档里。
 
 ---
 
@@ -94,7 +95,7 @@ tools/lint-package.sh packaging/MyApp      # 本地跑；CI 的「校验打包�
 ```
 apps/MyApp/
 ├── package/                   # fnOS 包模板（fnpack create MyApp 生成后改名）
-│   ├── manifest               # 占位符 ${VERSION} ${CHANGELOG} ${PLATFORM} 必须保留
+│   ├── manifest               # 占位符必须保留；三个作者按 specs/authorship.md
 │   ├── config/                # resource（含 privilege）
 │   ├── cmd/                   # install/upgrade/uninstall/config 生命周期 + main
 │   ├── wizard/
@@ -116,7 +117,7 @@ fnpack create MyApp              # native
 fnpack create MyApp --template docker
 
 # 生命周期 + 卸载 + 验收（含占位符替换）
-本仓库 tools/scaffold-lifecycle.sh --pkg-dir packaging/MyApp --app MyApp ...
+本仓库 tools/scaffold-lifecycle.sh --pkg-dir apps/MyApp/package --app MyApp ...
 ```
 
 ### 2. `build.sh` 契约
@@ -134,7 +135,9 @@ fnpack create MyApp --template docker
 
 ### 3. 在 FnDepot 上架（只做一次）
 
-见 [FnDepot/README.md](../FnDepot/README.md)。**跳过这步会让端到端静默失败**。
+在 FnDepot 仓库跑 `python3 tools/add-app.py --help` 看参数（**源作者是必填**，口径见
+[`specs/authorship.md`](specs/authorship.md)）。**跳过这步会让端到端静默失败**：
+缺必填字段的应用会被客户端直接跳过，而索引看起来完全正常。
 
 ### 4. 触发构建
 

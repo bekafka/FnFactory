@@ -2,10 +2,10 @@
 # ==============================================================================
 # 打包规范门禁：在 CI 里对应用包的模板做结构检查。
 #
-#   tools/lint-package.sh <package-template-dir>   # 例如 packaging/MyApp
+#   tools/lint-package.sh <package-template-dir>   # 例如 apps/MyApp/package
 #
 # 只检查"规范里写成硬性要求"的部分，风格问题不管。任何一条不过就 exit 1。
-# 规范：specs/uninstall.md、specs/lifecycle.md、specs/acceptance.md
+# 规范：specs/authorship.md、specs/uninstall.md、specs/lifecycle.md、specs/acceptance.md
 # ==============================================================================
 set -u
 DIR="${1:-}"
@@ -98,6 +98,56 @@ assert v.isdigit(), f"wizard_port 默认值不是数字：{v!r}"
 assert v not in {"8080", "8000", "3000", "5000"}, f"默认端口 {v} 是热门端口，容易冲突"
 PY
   then pass "安装向导：端口字段有非热门默认值"; else fail "安装向导端口默认值不合规（缺字段 / 非数字 / 热门端口）"; fi
+fi
+
+# ── 6. 作者口径（specs/authorship.md）────────────────────────────────────────
+# 三个作者：开发者 maintainer / 发布者 distributor / 源作者 source_author。
+# 前两个固定写本仓库所有者；源作者指上游项目最初的创造者与权利源头。
+# 换维护者时用环境变量覆盖，不要改脚本里的默认值。
+OWNER="${FACTORY_OWNER:-bekafka}"
+DEV_URL="${FACTORY_DEV_URL:-https://github.com/bekafka/FnDepot}"
+PUB_URL="${FACTORY_PUB_URL:-https://github.com/bekafka/FnDepot}"
+
+mval() {
+  # 取 manifest 里某个键的第一处值，去掉首尾空白与包裹引号
+  grep -E "^$1[[:space:]]*=" "$DIR/manifest" 2>/dev/null | head -1 \
+    | sed -E 's/^[^=]*=[[:space:]]*//; s/[[:space:]]+$//; s/^"(.*)"$/\1/'
+}
+
+if [ -f "$DIR/manifest" ]; then
+  echo "== 作者口径（specs/authorship.md）"
+  maint=$(mval maintainer);      maint_url=$(mval maintainer_url)
+  dist=$(mval distributor);      dist_url=$(mval distributor_url)
+  src=$(mval source_author);     src_url=$(mval source_author_url)
+
+  [ "$maint" = "$OWNER" ] && pass "开发者 maintainer=$OWNER" \
+    || fail "maintainer 应为 $OWNER，实际 ${maint:-缺失}"
+  [ "$maint_url" = "$DEV_URL" ] && pass "开发者主页 maintainer_url=$DEV_URL" \
+    || fail "maintainer_url 应为 $DEV_URL，实际 ${maint_url:-缺失}"
+  [ "$dist" = "$OWNER" ] && pass "发布者 distributor=$OWNER" \
+    || fail "distributor 应为 $OWNER，实际 ${dist:-缺失}"
+  [ "$dist_url" = "$PUB_URL" ] && pass "发布仓库 distributor_url=$PUB_URL" \
+    || fail "distributor_url 应为 $PUB_URL，实际 ${dist_url:-缺失}"
+
+  case "$src" in
+    ""|your-name|@*@|TODO*) fail "缺少源作者 source_author（上游项目最初的作者/组织）" ;;
+    *) pass "源作者 source_author=$src" ;;
+  esac
+
+  if printf '%s' "$src_url" | grep -qE '^https://github\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+/?$'; then
+    pass "源作者项目页 source_author_url=$src_url"
+    url_owner=$(printf '%s' "$src_url" | sed -E 's#^https://github\.com/([^/]+)/.*#\1#')
+    if [ -n "$src" ] && [ "$src" != "$url_owner" ]; then
+      fail "source_author（$src）与项目页 owner（$url_owner）不一致"
+    fi
+    if grep -E '^desc[[:space:]]*=' "$DIR/manifest" | head -1 | grep -qF "$src_url"; then
+      pass "desc 里带源作者链接（应用中心可见）"
+    else
+      fail "desc 里没有源作者链接 $src_url（用户在应用中心看不到源作者）"
+    fi
+  else
+    fail "source_author_url 必须是上游项目主页 https://github.com/<owner>/<repo>，实际 ${src_url:-缺失}"
+  fi
 fi
 
 echo

@@ -124,6 +124,15 @@ jobs:
           set -euo pipefail
           bash .factory/tools/lint-package.sh "${{ inputs.template_dir }}"
 
+      - name: 准备 Go 工具链（应用在 packaging/needs-go 里声明需要）
+        # runner 自带的 Go 可能比 go.mod 要求的旧（Magpie 要 1.26.3）：
+        # GOTOOLCHAIN=auto 能自己下载，但每次 ~60MB；声明过的应用直接装 stable。
+        if: hashFiles(format('apps/{0}/packaging/needs-go', inputs.app_key)) != ''
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+          cache: false
+
       - name: 准备 fnpack 工具（带 sha256 校验）
         env:
           FNPACK_ARCH: amd64
