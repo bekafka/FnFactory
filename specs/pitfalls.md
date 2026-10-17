@@ -92,3 +92,39 @@
 
 CLI、系统内部调用、补全触发卸载时都不会带 `wizard_*`。
 `uninstall_callback` 里 `${wizard_uninstall_mode:-keep}`，**默认保留**，删数据只能由用户显式选。
+
+## 13. fnpack 1.2.3 与 1.2.4 的版本号校验差异（CI 必读）
+
+实测（2026-10-17，在飞牛设备上直接跑）：
+
+| fnpack | 来源 | `version=2.0.0-beta.49` | `version=2.0.0-49` |
+|---|---|---|---|
+| 1.2.3 | 官方 amd64（`static2.fnnas.com`） | ✅ 通过 | ✅ 通过 |
+| 1.2.4 | 飞牛设备自带 arm64 | ❌ `Packing failed. Invalid version` | ✅ 通过 |
+
+1.2.4 要求 `x.y.z[-r]` 且 `r` 是**整数**，任何 `beta.N`/`rc.N` 后缀都被拒。
+官方只发布过 amd64 1.2.3（`fnnas-apps/fnpack` 仓库与 static2 均无 arm64 工件）。
+
+**打包厂的做法**（`_build-fpk.yml` 已固化）：
+
+- 两个架构**统一用 amd64 1.2.3**（fnpack 只做打包不执行包内文件，宿主架构无所谓）；
+- arm64 runner 执行不了 amd64 ELF → `apt-get install qemu-user-static` 经 binfmt 静态执行。
+
+**给新应用的推论**：版本号想保留上游的 `-beta.N`/`-rc.N` 后缀，就必须走本工厂的 CI；
+在飞牛设备上直接用它的 `/usr/local/bin/fnpack`（1.2.4）打这种版本会失败。
+
+## 14. GitHub Actions 可复用 workflow 的四个坑（都已修）
+
+1. **`find | head` 的 SIGPIPE**：`set -o pipefail` 下 `find … | head -40` 在文件多于 40 个时
+   必现 exit 141/1。所有展示用的管道加 `|| true`。
+2. **reusable workflow 里 `gh release`**：release job 没有 checkout 时
+   `failed to run git: fatal: not a git repository` —— 可复用 workflow 不会继承调用方的
+   检出状态，每个用 `gh` 的 job 都要自己 checkout。
+3. **`$GITHUB_OUTPUT` 写多行 JSON**：file-command 格式要求单行值，直接 `echo "packages=$JSON"`
+   会报 `Invalid format '  "x86": {'`。多行值必须用 heredoc 定界符：
+   ```bash
+   echo "packages<<__PKG__"; echo "$PACKAGES"; echo "__PKG__" >> "$GITHUB_OUTPUT"
+   ```
+   （`steps.<id>.outputs` 读出来是完整 JSON。）
+4. **首次收录时 FnDepot 必须先有应用键**：发布 job 只写 `releases.<version>` 节点，
+   `.apps[K]` 不存在时校验步骤会红。上架流程见 FnDepot 的 `tools/add-app.py`。
