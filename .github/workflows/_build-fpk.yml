@@ -124,6 +124,8 @@ jobs:
           bash .factory/tools/lint-package.sh "${{ inputs.template_dir }}/${{ inputs.app_key }}"
 
       - name: 准备 fnpack 工具（带 sha256 校验）
+        env:
+          FNPACK_ARCH: amd64
         run: |
           set -euo pipefail
           # 注意：fnpack 的宿主架构与包内产物架构无关（只做 tar/打包，不执行包内文件），
@@ -133,7 +135,7 @@ jobs:
           cp ".factory/tools/fnpack-linux-amd64" ./fnpack
           chmod +x ./fnpack
           ACTUAL=$(sha256sum ./fnpack | awk '{print $1}')
-          EXPECTED=$(grep "fnpack-linux-${ARCH}$" .factory/tools/SHA256SUMS | awk '{print $1}')
+          EXPECTED=$(grep "fnpack-linux-${FNPACK_ARCH}$" .factory/tools/SHA256SUMS | awk '{print $1}')
           if [ -n "$EXPECTED" ] && [ "$ACTUAL" != "$EXPECTED" ]; then
             echo "::error::fnpack 哈希不符：期望 $EXPECTED 实际 $ACTUAL"; exit 1
           fi
