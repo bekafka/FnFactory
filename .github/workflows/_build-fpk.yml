@@ -7,7 +7,7 @@ name: Build FPK (reusable)
 #   jobs:
 #     build:
 #       permissions: { contents: write }
-#       uses: bekafka/fpk-factory/.github/workflows/_build-fpk.yml@main
+#       uses: bekafka/FnFactory/.github/workflows/_build-fpk.yml@main
 #       with:
 #         app_key:      MyApp
 #         version:      ${{ github.ref_name }}      # 或从 tag 解析
@@ -41,12 +41,12 @@ on:
         type: string
         default: '{"include":[{"os":"ubuntu-24.04","arch":"amd64","platform":"x86"},{"os":"ubuntu-24.04-arm","arch":"arm64","platform":"arm"}]}'
       template_dir:
-        description: '包模板所在目录（相对应用仓库根）'
+        description: '包模板目录本身（含 manifest/cmd/wizard/config；相对调用方仓库根）'
         required: false
         type: string
-        default: 'packaging'
+        default: 'packaging/<App>'
       build_script:
-        description: '产出 payload 的脚本路径（相对应用仓库根）'
+        description: '产出 payload 的脚本路径（相对调用方仓库根）'
         required: false
         type: string
         default: 'packaging/build.sh'
@@ -69,7 +69,7 @@ on:
         description: '打包厂仓库（提供 fnpack 工具）。⚠️ 若改仓库名，本文件两处必须同步改：这个默认值 + publish job 的 uses:'
         required: false
         type: string
-        default: 'bekafka/fpk-factory'
+        default: 'bekafka/FnFactory'
     outputs:
       tag:
         description: '本次发布使用的 tag'
@@ -110,9 +110,10 @@ jobs:
       - name: 校验契约
         run: |
           set -euo pipefail
-          [ -d "${{ inputs.template_dir }}/${{ inputs.app_key }}" ] || {
-            echo "::error::缺少包模板目录 ${{ inputs.template_dir }}/${{ inputs.app_key }}"; exit 1; }
-          [ -f "${{ inputs.template_dir }}/${{ inputs.app_key }}/manifest" ] || {
+          # template_dir 就是模板目录本身（含 manifest/cmd/wizard/…）
+          [ -d "${{ inputs.template_dir }}" ] || {
+            echo "::error::缺少包模板目录 ${{ inputs.template_dir }}"; exit 1; }
+          [ -f "${{ inputs.template_dir }}/manifest" ] || {
             echo "::error::模板里缺少 manifest"; exit 1; }
           [ -f "${{ inputs.build_script }}" ] || {
             echo "::error::缺少构建脚本 ${{ inputs.build_script }}"; exit 1; }
@@ -121,7 +122,7 @@ jobs:
       - name: 校验打包规范（specs/）
         run: |
           set -euo pipefail
-          bash .factory/tools/lint-package.sh "${{ inputs.template_dir }}/${{ inputs.app_key }}"
+          bash .factory/tools/lint-package.sh "${{ inputs.template_dir }}"
 
       - name: 准备 fnpack 工具（带 sha256 校验）
         env:
@@ -157,7 +158,7 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf build_workspace && mkdir -p build_workspace
-          cp -r "${{ inputs.template_dir }}/${{ inputs.app_key }}" build_workspace/
+          cp -r "${{ inputs.template_dir }}" "build_workspace/${{ inputs.app_key }}"
           mv ./fnpack build_workspace/fnpack
           mkdir -p "$PAYLOAD_DIR"
 
@@ -259,7 +260,7 @@ jobs:
     if: ${{ inputs.publish }}
     permissions:
       contents: write
-    uses: bekafka/fpk-factory/.github/workflows/_publish-index.yml@main
+    uses: bekafka/FnFactory/.github/workflows/_publish-index.yml@main
     with:
       app_key:      ${{ inputs.app_key }}
       version:      ${{ inputs.version }}

@@ -1,82 +1,49 @@
-# fpk-factory · FPK 打包厂
+# FnFactory · FPK 构建机器人仓库
 
-把任意应用自动打成飞牛 fnOS 可安装的 `.fpk`，发到 GitHub Release，并写回
-[FnDepot](../FnDepot) 索引。**本仓库自己不产生应用**，它只提供可复用的流水线。
+把任意应用打成飞牛 fnOS 可安装的 `.fpk`，发到 **FnDepot 的 Release**，并写回它的索引。
+**本仓库不产生任何应用**，它是构建机器人：提供可复用流水线（workflow）、
+打包规范（`specs/`）、可继承模板（`templates/`）与工具。
 
 ---
 
-## 架构（拓扑 C：混合）
+## 架构（集中式，2026-10-17 定案）
 
 ```
-① 自研应用仓库                    ② 打包厂（本仓库）              ③ 索引仓库
-   bekafka/myapp                     bekafka/fpk-factory            bekafka/FnDepot
-   ├── src/                          ├── tools/fnpack-linux-*       ├── fnpack.json
-   ├── packaging/                    ├── .github/workflows/         ├── categories.json
-   │   ├── MyApp/  (fnOS 包模板)     │   ├── _build-fpk.yml   ◀──┐  └── tools/
-   │   └── build.sh                  │   ├── _publish-index.yml ◀─┤
-   └── .github/workflows/release.yml ┘   └── _auto-upstream.yml    │
-              │  uses: .../_build-fpk.yml@main                      │
-              │  uses: .../_publish-index.yml@main ─────────────────┘
-              ▼
-        Release（.fpk 资产留在这里）
+① FnDepot（应用源码 + 索引）        ② FnFactory（本仓库）
+   bekafka/FnDepot                     bekafka/FnFactory
+   ├── fnpack.json  ← 客户端只读它      ├── .github/workflows/
+   ├── assets/                         │   ├── _build-fpk.yml   ◀── 被 FnDepot 调用
+   └── apps/                           │   ├── _publish-index.yml
+       └── <App>/                      │   └── _auto-upstream.yml
+           ├── package/  (fnOS 模板)   ├── specs/      打包规范
+           ├── packaging/build.sh      ├── templates/ 可继承模板
+           ├── tests/                  └── tools/     fnpack + scaffold + lint
+           └── README.md
+                  │  uses: FnFactory/.github/workflows/_build-fpk.yml@main
+                  ▼
+        Release（.fpk 资产发布在 FnDepot 自己仓库里）
 ```
 
 | 仓库 | 角色 | 客户端读它吗 |
 |---|---|---|
-| **应用仓库**（各一个） | 源码 + 包模板 + `build.sh` | ❌ |
-| **打包厂**（本仓库，一个） | 可复用流水线 + fnpack 工具 | ❌ |
-| **FnDepot**（一个） | 索引元数据 | ✅ 只读它 |
+| **FnDepot** | 每个 fpk 应用的**源代码项目** + 索引；`.fpk` 资产发在自己的 Release 里 | ✅ 只读 `fnpack.json` |
+| **FnFactory**（本仓库） | 构建机器人：可复用流水线 + 规范 + fnpack 工具 | ❌ |
 
-**重打包上游**（别人的二进制/镜像，自己没有源码仓库）就走本仓库：
-在 `fnpack/<App>/` 放模板，在 `.github/workflows/` 放一条流水线。
+**分工**：应用源码进 FnDepot 的 `apps/<App>/`；FnFactory 只提供"怎么把源码变成可安装的包"
+（workflow + 规范 + 工具）。产物回落到 FnDepot 的 Release，索引写回 FnDepot 的 `fnpack.json`。
 
----
+### 为什么这样收敛
 
-## 核心设计：三类应用共用一条流水线
+- 一个仓库装下所有应用的源码，个人/小团队维护的第三方生态更容易整体浏览和复用；
+- 可复用 workflow 里 `github.repository` 指向**调用方**，所以 Release 天然落在 FnDepot，
+  不需要额外 PAT —— `GITHUB_TOKEN` 自己就能写自己的索引；
+- 资产走 Release 而不是 git 提交，仓库体积始终保持小巧。
 
-二进制 / Node-Python / Docker **不是三种流水线**——它们的打包流程完全一样：
-
-```
-取产物 → 套模板 → 注入占位符 → fnpack build → 改名 → Release → 写索引
-   ▲
-   └── 唯一因类型而异的一步，由应用自己的 packaging/build.sh 实现
-```
-
-所以本仓库只有**一条**构建流水线，差异全部收敛到应用仓库的一个脚本里。
-
-| 类型 | fnpack 模板 | build.sh 范例 | 要点 |
-|---|---|---|---|
-| **二进制** | `native` | [`examples/build-binary.sh.example`](examples/build-binary.sh.example) | 交叉编译 + `platform` 拆包 |
-| **Node / Python** | `native` | [`examples/build-runtime-dep.sh.example`](examples/build-runtime-dep.sh.example) | **不打包运行时**，`install_dep_apps` 声明 |
-| **Docker** | `docker` | [`examples/build-docker.sh.example`](examples/build-docker.sh.example) | 包内只有 compose，镜像另拉 |
-
-> Node / Python **仍然属于 native**。它们和纯二进制的区别只在「运行时从哪来」，不影响 fnpack 模板的选择。
-
-### 官方自带的运行时（不要自己打包）
-
-实测确认（读设备上已安装应用的 manifest）：
-
-| 依赖名 | 版本 | 提供方 | 证据 |
-|---|---|---|---|
-| `nodejs_v24` | 24.13.1-1 | **飞牛官方** | `/var/apps/nodejs_v24/manifest` → `distributor = fnos` |
-| `bunjs` | 1.3.9 | **飞牛官方** | `distributor = fnos` |
-| `python312` | 3.12.13-1 | 官方运行时 | 官方文档列出 |
-| `go-1.26` | 1.26.4 | 官方运行时 | 已安装 |
-| `redis` / `minio` / `rabbitmq` | — | 官方中间件 | 官方文档列出 |
-
-写在应用模板的 `manifest` 里：
-
-```ini
-install_dep_apps=nodejs_v24
-```
-
-生命周期脚本里必须先注入 PATH，否则会落到系统自带的旧版本：
-
-```bash
-export PATH=/var/apps/nodejs_v24/target/bin:$PATH
-```
+> Release tag 必须带应用名前缀（`<App>-v<version>`）：多应用共仓时这是防 tag 相撞的唯一手段。
 
 ---
+
+## 接入一个新应用（4 步）
 
 ## 打包规范（`specs/`）—— 踩过的坑，别再踩
 
@@ -97,7 +64,7 @@ export PATH=/var/apps/nodejs_v24/target/bin:$PATH
 ### 一键继承
 
 ```bash
-../fpk-factory/tools/scaffold-lifecycle.sh \
+本仓库 tools/scaffold-lifecycle.sh \
   --pkg-dir packaging/MyApp --app MyApp --prefix MYAPP --port 26800 \
   --health /healthz --mode entry --entry dist/server/index.mjs \
   --launch 'exec "$NODE_BIN" --max-old-space-size="${MAX_OLD_SPACE:-512}" "$ENTRY"' \
@@ -125,17 +92,22 @@ tools/lint-package.sh packaging/MyApp      # 本地跑；CI 的「校验打包�
 ### 1. 应用仓库放模板与脚本
 
 ```
-myapp/
+apps/MyApp/
+├── package/                   # fnOS 包模板（fnpack create MyApp 生成后改名）
+│   ├── manifest               # 占位符 ${VERSION} ${CHANGELOG} ${PLATFORM} 必须保留
+│   ├── config/                # resource（含 privilege）
+│   ├── cmd/                   # install/upgrade/uninstall/config 生命周期 + main
+│   ├── wizard/
+│   └── app/
 ├── packaging/
-│   ├── MyApp/                 # fnOS 包模板（可用 fnpack create MyApp 生成）
-│   │   ├── manifest           # 占位符 ${VERSION} ${CHANGELOG} ${PLATFORM} 必须保留
-│   │   ├── config/            # resource（含 privilege）
-│   │   ├── cmd/               # install/upgrade/uninstall/config 生命周期 + main
-│   │   ├── wizard/
-│   │   └── app/
-│   └── build.sh               # 从 examples/ 挑一个改名而来
-└── .github/workflows/release.yml   # 从 examples/app-release.yml 改名而来
+│   ├── build.sh               # 从 examples/ 挑一个改名而来
+│   ├── patches/               # 可选：上游兼容补丁
+│   └── tools/                 # 可选：payload 生产线自带的工具
+└── tests/                     # 验收阶梯
 ```
+
+**目录名 = appname**（`apps/MyApp/` 的 `MyApp` 必须逐字等于 `package/manifest` 里的
+`appname`），索引键、Release tag、资产名全靠它对齐。
 
 生成官方模板骨架，再用工厂的规范模板覆盖生命周期/卸载/验收：
 
@@ -144,7 +116,7 @@ fnpack create MyApp              # native
 fnpack create MyApp --template docker
 
 # 生命周期 + 卸载 + 验收（含占位符替换）
-../fpk-factory/tools/scaffold-lifecycle.sh --pkg-dir packaging/MyApp --app MyApp ...
+本仓库 tools/scaffold-lifecycle.sh --pkg-dir packaging/MyApp --app MyApp ...
 ```
 
 ### 2. `build.sh` 契约
@@ -164,17 +136,17 @@ fnpack create MyApp --template docker
 
 见 [FnDepot/README.md](../FnDepot/README.md)。**跳过这步会让端到端静默失败**。
 
-### 4. 配 Secret 并打 tag
+### 4. 触发构建
 
-应用仓库 → Settings → Secrets → Actions，加：
-
-| Secret | 内容 |
-|---|---|
-| `FNDEPOT_TOKEN` | classic PAT，勾 `repo`，对 FnDepot 有写权限 |
+集中式模型下**不需要配任何 secret** —— 发布发生在 FnDepot 自己的仓库里，
+`GITHUB_TOKEN` 就够了。在 FnDepot 仓库跑 Actions：
 
 ```bash
-git tag v1.0.0 && git push origin v1.0.0
+# 手动触发：Actions → Build App → Run workflow
+# 填 app_key=MyApp、version=1.0.0、changelog=...
 ```
+
+（也可在 FnDepot 加一条 push tag 的触发器，见 `examples/depot-build-app.yml`。）
 
 ---
 
@@ -185,6 +157,10 @@ git tag v1.0.0 && git push origin v1.0.0
 | [`_build-fpk.yml`](.github/workflows/_build-fpk.yml) | 通用构建：矩阵 → fnpack build → Release → 调发布 |
 | [`_publish-index.yml`](.github/workflows/_publish-index.yml) | 写回索引：防呆 + platform 并集 + README 同步 + verify 门禁 |
 | [`_auto-upstream.yml`](.github/workflows/_auto-upstream.yml) | 可选：每周巡检上游 release，有新版自动触发 |
+
+`_build-fpk.yml` 的 `template_dir` 指向**模板目录本身**（不再拼 app_key），
+`build_script` 指向应用自己的 payload 生产线。调用方例子见
+[examples/depot-build-app.yml](examples/depot-build-app.yml)。
 
 `_build-fpk.yml` 在「校验契约」之后会跑 [`tools/lint-package.sh`](tools/lint-package.sh)：
 卸载向导、`keep` 默认、路径护栏、`/proc` 身份校验、热门端口默认值这些规范项不过，构件不会产出。

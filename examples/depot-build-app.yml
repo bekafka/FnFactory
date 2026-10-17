@@ -1,0 +1,80 @@
+# ============================================================================
+# FnDepot 集中式模型的发布入口（放在 FnDepot 仓库的 .github/workflows/ 下）
+#
+# 位置：bekafka/FnDepot/.github/workflows/build-app.yml （已实际部署）
+# 触发：Actions → Build App → Run workflow（app_key / version / changelog）
+#
+# 要点：
+#   · template_dir 指向模板目录本身（apps/<App>/package）
+#   · build_script 指向应用的 payload 生产线（apps/<App>/packaging/build.sh）
+#   · release_tag 带应用名前缀，防止多应用撞 tag
+#   · 不需要 secret：发布在 FnDepot 自己仓库，GITHUB_TOKEN 够用
+# ============================================================================
+name: Build App
+
+on:
+  workflow_dispatch:
+    inputs:
+      app_key:
+        description: '应用键名（apps/ 下目录名，等于 manifest appname）'
+        required: true
+        type: string
+      version:
+        description: '版本号（不带 v）'
+        required: true
+        type: string
+      changelog:
+        description: '更新日志'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  meta:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.m.outputs.version }}
+      changelog: ${{ steps.m.outputs.changelog }}
+      app_key: ${{ steps.m.outputs.app_key }}
+      release_tag: ${{ steps.m.outputs.release_tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: 解析并校验
+        id: m
+        env:
+          IN_APP: ${{ github.event.inputs.app_key }}
+          IN_VERSION: ${{ github.event.inputs.version }}
+          IN_CHANGELOG: ${{ github.event.inputs.changelog }}
+        run: |
+          set -euo pipefail
+          APP="${IN_APP:?必须填 app_key}"
+          VERSION="${IN_VERSION:?必须填 version}"
+          CHANGELOG="${IN_CHANGELOG:-版本 ${VERSION} 发布}"
+          [ -d "apps/$APP/package" ]           || { echo "::error::apps/$APP/package 不存在"; exit 1; }
+          [ -f "apps/$APP/package/manifest" ]  || { echo "::error::缺 manifest"; exit 1; }
+          DECLARED=$(grep -oP '^appname\s*=\s*\K.*' "apps/$APP/package/manifest" | head -1 | tr -d '\r')
+          [ "$DECLARED" = "$APP" ] || { echo "::error::appname=$DECLARED 与目录名 $APP 不一致"; exit 1; }
+          {
+            echo "app_key=$APP"
+            echo "version=$VERSION"
+            echo "release_tag=${APP}-v${VERSION}"
+            echo "changelog<<__EOF__"
+            echo "$CHANGELOG"
+            echo "__EOF__"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: meta
+    uses: bekafka/FnFactory/.github/workflows/_build-fpk.yml@main
+    with:
+      app_key:      ${{ needs.meta.outputs.app_key }}
+      version:      ${{ needs.meta.outputs.version }}
+      changelog:    ${{ needs.meta.outputs.changelog }}
+      release_tag:  ${{ needs.meta.outputs.release_tag }}
+      publish:      true
+      template_dir: 'apps/${{ needs.meta.outputs.app_key }}/package'
+      build_script: 'apps/${{ needs.meta.outputs.app_key }}/packaging/build.sh'
+    secrets:
+      FNDEPOT_TOKEN: ${{ secrets.GITHUB_TOKEN }}
