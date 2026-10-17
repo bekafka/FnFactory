@@ -154,10 +154,10 @@ jobs:
           # 由应用自己的脚本产出 payload —— 三类应用的唯一差异点就在这里
           bash "${{ inputs.build_script }}"
 
-          echo "--- payload 内容 ---"
-          find "$PAYLOAD_DIR" -type f | head -40
+          echo "--- payload 内容（前 40 个文件）---"
+          find "$PAYLOAD_DIR" -type f | head -40 || true
           echo "--- payload 大小 ---"
-          du -sh "$PAYLOAD_DIR"
+          du -sh "$PAYLOAD_DIR" || true
 
       - name: 注入 manifest 占位符
         env:
