@@ -146,7 +146,7 @@ jobs:
             echo "::error::fnpack 哈希不符：期望 $EXPECTED 实际 $ACTUAL"; exit 1
           fi
           echo "✓ fnpack sha256=$ACTUAL"
-          ./fnpack --help | head -2
+          ./fnpack --help >/dev/null 2>&1 || ./fnpack --help | head -2 || true
 
       - name: 组装工作区（模板 + payload）
         env:
