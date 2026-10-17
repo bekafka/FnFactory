@@ -140,9 +140,14 @@ jobs:
             exit 1
           fi
 
+          # GITHUB_OUTPUT 的 file-command 格式要求单行值；多行 JSON 必须用 heredoc 定界符
           {
-            echo "packages=$PACKAGES"
-            echo "arches=$ARCHES"
+            echo "packages<<__PKG__"
+            echo "$PACKAGES"
+            echo "__PKG__"
+            echo "arches<<__ARCH__"
+            echo "$ARCHES"
+            echo "__ARCH__"
           } >> "$GITHUB_OUTPUT"
           echo "共匹配 $FOUND 个架构"
 
