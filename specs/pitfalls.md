@@ -128,3 +128,27 @@ CLI、系统内部调用、补全触发卸载时都不会带 `wizard_*`。
    （`steps.<id>.outputs` 读出来是完整 JSON。）
 4. **首次收录时 FnDepot 必须先有应用键**：发布 job 只写 `releases.<version>` 节点，
    `.apps[K]` 不存在时校验步骤会红。上架流程见 FnDepot 的 `tools/add-app.py`。
+
+## 15. 集中式模型（FnDepot 装源码 + FnFactory 构建）的两个坑
+
+1. **changelog 里的 `/` 和 `&` 会炸掉 sed 注入**：`sed "s/\${CHANGELOG}/${ESCAPED}/"`
+   的替换文本含分隔符/`&` 时直接报 `unknown option to 's'`。用 python 做纯字符串
+   `str.replace("${KEY}", value)` 最稳，无需任何转义。
+   注意 YAML 块标量（`run: |`）里的 heredoc 代码必须缩进到块内，否则 YAML 解析失败。
+2. **可复用 workflow 会收紧 token 权限**：调用方即使声明 `contents: write`，被调用
+   workflow 顶层若写 `contents: read`，子 job 的 `GITHUB_TOKEN` 就是 read。
+   集中式模型下推送目标就是调用方仓库（FnDepot），两处都必须 `contents: write`：
+   ```yaml
+   permissions:
+     contents: write     # 被调用 workflow 顶层
+   jobs:
+     publish:
+       permissions:
+         contents: write # job 级（可选，显式更好）
+   ```
+   另需仓库设置 Actions 默认权限为 write（`PUT /repos/{repo}/actions/permissions/workflow`）。
+
+## 16. 多应用共仓的 tag 规范
+
+Release tag 必须带应用名前缀：`<App>-v<version>`（如 `Motrix-v2.0.0-beta.49`）。
+否则两个应用同版本号会撞 tag，资产互相覆盖。资产名保持 `<App>-<version>-<arch>.fpk`。
