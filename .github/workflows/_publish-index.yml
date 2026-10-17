@@ -45,12 +45,14 @@ on:
         required: true
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   publish:
     name: 写入 FnDepot 索引
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
       - name: 检出索引仓库
         env:
