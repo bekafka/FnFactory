@@ -178,11 +178,16 @@ jobs:
         run: |
           set -euo pipefail
           MANIFEST="build_workspace/${{ inputs.app_key }}/manifest"
-          # changelog 可能多行/含中文：先过 jq 转义再 sed；${XXX} 必须写成 \${XXX}
-          ESCAPED_CHANGELOG=$(printf '%s' "$CHANGELOG" | jq -sRr @json)
-          sed -i "s/\${VERSION}/${VERSION}/g"             "$MANIFEST"
-          sed -i "s/\${CHANGELOG}/${ESCAPED_CHANGELOG}/g" "$MANIFEST"
-          sed -i "s/\${PLATFORM}/${PLATFORM}/g"           "$MANIFEST"
+          # changelog 可能多行/含中文/含特殊字符：用 python 做字符串替换，绕开 sed 的
+          # 分隔符与转义地狱（changelog 里出现 / 或 & 会让 sed 表达式直接报错）。
+          VERSION="$VERSION" PLATFORM="$PLATFORM" CHANGELOG="$CHANGELOG" python3 - "$MANIFEST" <<'PYEOF'
+          import os, sys
+          path = sys.argv[1]
+          text = open(path, encoding="utf-8").read()
+          for key in ("VERSION", "PLATFORM", "CHANGELOG"):
+              text = text.replace("${%s}" % key, os.environ[key])
+          open(path, "w", encoding="utf-8").write(text)
+          PYEOF
           echo "--- 注入后的 manifest ---"; cat "$MANIFEST"
 
       - name: fnpack build 并规范化资产名
