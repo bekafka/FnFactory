@@ -128,11 +128,17 @@ jobs:
           FNPACK_ARCH: amd64
         run: |
           set -euo pipefail
-          # 注意：fnpack 的宿主架构与包内产物架构无关（只做 tar/打包，不执行包内文件），
-          # 但官方只发布了 amd64 1.2.3；设备自带的 arm64 1.2.4 会拒绝
-          # "x.y.z-beta.N" 这类版本号（要求 x.y.z[-r]，r 是整数）。
-          # 因此统一用 amd64 1.2.3 打包，两个架构都过。
-          cp ".factory/tools/fnpack-linux-amd64" ./fnpack
+          # fnpack 版本选择（2026-10-17 定案）：
+          #   · 1.2.4（设备自带的 arm64）会拒绝 "x.y.z-beta.N" 版本号（要求 x.y.z[-r]，r 为整数）
+          #   · 1.2.3（官方 amd64）没有这个校验
+          # 所以 arm64 包也统一用 amd64 1.2.3 —— 但 arm64 runner 执行不了 amd64 ELF，
+          # 需要 qemu-user 静态模拟（ubuntu runner 预装 binfmt 支持）。
+          if [ "$(uname -m)" = "x86_64" ]; then
+            cp ".factory/tools/fnpack-linux-amd64" ./fnpack
+          else
+            sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user-static >/dev/null
+            cp ".factory/tools/fnpack-linux-amd64" ./fnpack
+          fi
           chmod +x ./fnpack
           ACTUAL=$(sha256sum ./fnpack | awk '{print $1}')
           EXPECTED=$(grep "fnpack-linux-${FNPACK_ARCH}$" .factory/tools/SHA256SUMS | awk '{print $1}')
