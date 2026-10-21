@@ -69,6 +69,11 @@ on:
         required: false
         type: string
         default: ''
+      asset_pattern:
+        description: '资产名模板，支持 {app} {version} {arch}（arch 即 platform）'
+        required: false
+        type: string
+        default: '{app}-{version}-{arch}.fpk'
       publish:
         description: '是否写回 FnDepot 索引'
         required: false
@@ -314,6 +319,7 @@ jobs:
           APP_KEY: ${{ inputs.app_key }}
           VERSION: ${{ inputs.version }}
           CHANGELOG: ${{ inputs.changelog }}
+          PATTERN: ${{ inputs.asset_pattern }}
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -346,15 +352,21 @@ jobs:
               echo "::error::期望恰好 1 个 .fpk（$platform/$arch），实际 ${#FPK[@]} 个"
               exit 1
             fi
-            mv "${FPK[0]}" "${APP_KEY}-${VERSION}-${platform}.fpk"
-            echo "✓ ${APP_KEY}-${VERSION}-${platform}.fpk"
+            asset="${PATTERN//\{app\}/$APP_KEY}"
+            asset="${asset//\{version\}/$VERSION}"
+            asset="${asset//\{arch\}/$platform}"
+            case "$asset" in
+              ''|*/*|*..*) echo "::error::asset_pattern 生成了非法文件名：$asset"; exit 1 ;;
+            esac
+            mv "${FPK[0]}" "$asset"
+            echo "✓ $asset"
           done
 
       - name: 上传 FPK
         uses: actions/upload-artifact@v4
         with:
           name: fpk-all
-          path: ${{ inputs.app_key }}-${{ inputs.version }}-*.fpk
+          path: '*.fpk'
           if-no-files-found: error
 
   # ══════════════════════════════════════════════════════════════════
@@ -434,5 +446,6 @@ jobs:
       release_tag:  ${{ needs.release.outputs.tag }}
       source_repo:  ${{ github.repository }}
       fndepot_repo: ${{ inputs.fndepot_repo }}
+      asset_pattern: ${{ inputs.asset_pattern }}
     secrets:
       FNDEPOT_TOKEN: ${{ secrets.FNDEPOT_TOKEN }}
