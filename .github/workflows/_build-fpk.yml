@@ -279,7 +279,7 @@ jobs:
           bash .factory/tools/check-glibc.sh "$GLIBC_MAX" "$PAYLOAD_DIR"
 
       - name: 上传 payload
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: payload-${{ matrix.platform }}-${{ matrix.arch }}
           path: build_workspace/${{ inputs.app_key }}
@@ -376,7 +376,7 @@ jobs:
           done
 
       - name: 上传 FPK
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fpk-all
           path: '*.fpk'
