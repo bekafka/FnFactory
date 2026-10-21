@@ -6,25 +6,29 @@ name: Auto Detect Upstream Release (reusable)
 #
 #   jobs:
 #     watch:
-#       uses: bekafka/fpk-factory/.github/workflows/_auto-upstream.yml@main
+#       uses: bekafka/FnFactory/.github/workflows/_auto-upstream.yml@v1
 #       with:
-#         upstream_repo:    'MetaCubeX/mihomo'
+#         app_key:          Magpie
+#         upstream_repo:    'yetone/magpie'
 #         upstream_asset_re: 'linux-(amd64|arm64)'
-#         build_workflow:   'release.yml'
+#         build_workflow:   'build-app.yml'
+#         build_app_key:    Magpie
 #       secrets:
 #         UPSTREAM_TOKEN: ${{ secrets.UPSTREAM_TOKEN }}
 #
-# ⚠️ 必须用 PAT，不能用 GITHUB_TOKEN：
-#    由 GITHUB_TOKEN 触发的事件**不会再生新的 workflow run**，
-#    workflow_dispatch 会静默什么都不发生。
+# ⚠️ 触发 workflow_dispatch 必须用 PAT，不能用 GITHUB_TOKEN：
+#    由 GITHUB_TOKEN 触发的事件不会再生成新的 workflow run。
+#    读取公开上游 release 用 GITHUB_TOKEN 即可，不要滥用 PAT。
 #
-# 记账文件放在应用仓库根，名字默认 <app_key>-upstream.json。
+# 记账文件放在应用仓库根，名字 <app_key>-upstream.json。
+# 关键语义：只记录“已触发”，不把“已触发”当“已发布”；
+# 下次巡检会检查 Release 是否真的存在，不存在就重试。
 
 on:
   workflow_call:
     inputs:
       app_key:
-        description: '应用键名（用于记账文件名）'
+        description: '应用键名（用于记账文件名/Release tag 模板）'
         required: true
         type: string
       upstream_repo:
@@ -41,44 +45,91 @@ on:
         required: false
         type: string
         default: 'release.yml'
+      build_app_key:
+        description: '传给 build_workflow 的 app_key；不传则不发送该输入'
+        required: false
+        type: string
+        default: ''
       build_ref:
         description: '触发时使用的 ref'
         required: false
         type: string
         default: 'main'
+      release_tag_pattern:
+        description: '用于判断 Release 是否已存在的 tag 模板，支持 {app} {version}'
+        required: false
+        type: string
+        default: '{app}-v{version}'
     secrets:
       UPSTREAM_TOKEN:
         required: true
 
 permissions:
   contents: write
-  actions: write
+
+concurrency:
+  group: auto-upstream-${{ inputs.app_key }}
+  cancel-in-progress: false
 
 jobs:
   check:
+    name: 巡检上游
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - name: 检出应用仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: true
+
+      - name: 校验输入
+        env:
+          APP_KEY: ${{ inputs.app_key }}
+          UPSTREAM_REPO: ${{ inputs.upstream_repo }}
+          BUILD_WORKFLOW: ${{ inputs.build_workflow }}
+          BUILD_APP_KEY: ${{ inputs.build_app_key }}
+          BUILD_REF: ${{ inputs.build_ref }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$APP_KEY" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$' || {
+            echo "::error::app_key 非法：$APP_KEY"; exit 1; }
+          printf '%s' "$UPSTREAM_REPO" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' || {
+            echo "::error::upstream_repo 必须是 owner/repo：$UPSTREAM_REPO"; exit 1; }
+          printf '%s' "$BUILD_WORKFLOW" | grep -Eq '^[A-Za-z0-9._/-]+\.ya?ml$' || {
+            echo "::error::build_workflow 必须是 workflow 文件名：$BUILD_WORKFLOW"; exit 1; }
+          case "$BUILD_WORKFLOW" in *..*) echo "::error::build_workflow 不能包含 .."; exit 1 ;; esac
+          if [ -n "$BUILD_APP_KEY" ]; then
+            printf '%s' "$BUILD_APP_KEY" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$' || {
+              echo "::error::build_app_key 非法：$BUILD_APP_KEY"; exit 1; }
+          fi
+          printf '%s' "$BUILD_REF" | grep -Eq '^[A-Za-z0-9._/-]+$' || {
+            echo "::error::build_ref 非法：$BUILD_REF"; exit 1; }
 
       - name: 查询上游最新 release
         id: up
         env:
-          GH_TOKEN: ${{ secrets.UPSTREAM_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
           REPO: ${{ inputs.upstream_repo }}
           RE: ${{ inputs.upstream_asset_re }}
         run: |
           set -euo pipefail
-          # 取不到就必须报错退出，绝不能当成「上游没发新版」——
-          # 那会让这个应用被永久静默漏版，而且没人会发现。
-          if ! json=$(gh api "repos/${REPO}/releases/latest" 2>/dev/null); then
-            echo "::error::取不到 ${REPO} 的 latest release（网络或 token 问题），本次巡检作废"
+          # 不用 releases/latest：只发 prerelease 的项目会返回几年前的 stable。
+          if ! json=$(gh api "repos/${REPO}/releases?per_page=30" 2>/dev/null); then
+            echo "::error::取不到 ${REPO} 的 releases（网络或 token 问题），本次巡检作废"
             exit 1
           fi
-          TAG=$(echo "$json" | jq -r '.tag_name // empty')
-          [ -n "$TAG" ] || { echo "::error::上游响应里没有 tag_name"; exit 1; }
+          TAG=$(echo "$json" | jq -r '
+            [.[] | select(.draft == false)]
+            | sort_by(.published_at)
+            | last
+            | .tag_name // empty')
+          [ -n "$TAG" ] || { echo "::error::上游响应里没有可用 tag_name"; exit 1; }
 
           if [ -n "$RE" ]; then
-            N=$(echo "$json" | jq -r --arg re "$RE" '[.assets[].name | select(test($re))] | length')
+            N=$(echo "$json" | jq -r --arg re "$RE" --arg tag "$TAG" '
+              [.[] | select(.tag_name == $tag) | .assets[]?.name | select(test($re))]
+              | length')
             if [ "$N" -eq 0 ]; then
               echo "::warning::上游 $TAG 没有匹配 '$RE' 的资产，跳过"
               echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
@@ -87,47 +138,76 @@ jobs:
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
-      - name: 与已触发版本比对
+      - name: 判断是否需要触发
         id: cmp
         if: steps.up.outputs.skip != 'true'
         env:
-          STATE: ${{ inputs.app_key }}-upstream.json
+          GH_TOKEN: ${{ github.token }}
+          APP_KEY: ${{ inputs.app_key }}
           LATEST: ${{ steps.up.outputs.tag }}
+          PATTERN: ${{ inputs.release_tag_pattern }}
         run: |
           set -euo pipefail
-          PREV=""
-          [ -f "$STATE" ] && PREV=$(jq -r '.published_tag // empty' "$STATE" || echo "")
-          echo "上次触发：${PREV:-（无记录）}  上游最新：${LATEST}"
-          if [ "$LATEST" = "$PREV" ]; then
+          STATE="${APP_KEY}-upstream.json"
+          LAST_SEEN=""
+          LAST_DISPATCHED=""
+          [ -f "$STATE" ] && LAST_SEEN=$(jq -r '.last_seen_tag // empty' "$STATE" 2>/dev/null || true)
+          [ -f "$STATE" ] && LAST_DISPATCHED=$(jq -r '.last_dispatched_tag // empty' "$STATE" 2>/dev/null || true)
+
+          VERSION="${LATEST#v}"
+          REL_TAG="${PATTERN//\{app\}/$APP_KEY}"
+          REL_TAG="${REL_TAG//\{version\}/$VERSION}"
+
+          echo "上次看到：${LAST_SEEN:-（无记录）}  上次触发：${LAST_DISPATCHED:-（无记录）}"
+          echo "上游最新：${LATEST}  预期 Release tag：${REL_TAG}"
+
+          # Release 已经存在 = 这一版已经发过，不再重复构建。
+          if gh release view "$REL_TAG" >/dev/null 2>&1; then
             echo "needed=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "needed=true" >> "$GITHUB_OUTPUT"
+            echo "✓ Release $REL_TAG 已存在，跳过"
+            exit 0
           fi
+
+          # 上一次触发过但 Release 不存在：说明构建失败/尚未完成，本次重试。
+          echo "needed=true" >> "$GITHUB_OUTPUT"
+          echo "tag=$LATEST" >> "$GITHUB_OUTPUT"
 
       - name: 触发构建流水线
         if: steps.cmp.outputs.needed == 'true'
         env:
           GH_TOKEN: ${{ secrets.UPSTREAM_TOKEN }}
+          APP_KEY: ${{ inputs.app_key }}
+          BUILD_WORKFLOW: ${{ inputs.build_workflow }}
+          BUILD_APP_KEY: ${{ inputs.build_app_key }}
+          BUILD_REF: ${{ inputs.build_ref }}
           LATEST: ${{ steps.up.outputs.tag }}
         run: |
           set -euo pipefail
-          gh workflow run "${{ inputs.build_workflow }}" \
-            --ref "${{ inputs.build_ref }}" \
-            -f version="${LATEST#v}" \
-            -f changelog="上游 ${LATEST} 自动跟进"
-          echo "✓ 已触发 ${{ inputs.build_workflow }}（version=${LATEST#v}）"
+          VERSION="${LATEST#v}"
+          ARGS=(-f "version=${VERSION}" -f "changelog=上游 ${LATEST} 自动跟进")
+          if [ -n "$BUILD_APP_KEY" ]; then
+            ARGS+=(-f "app_key=${BUILD_APP_KEY}")
+          fi
+          gh workflow run "$BUILD_WORKFLOW" --ref "$BUILD_REF" "${ARGS[@]}"
+          echo "✓ 已触发 $BUILD_WORKFLOW（app=${BUILD_APP_KEY:-$APP_KEY}, version=${VERSION}）"
 
-      - name: 记账
+      - name: 记账（只记已触发，不记已发布）
         if: steps.cmp.outputs.needed == 'true'
         env:
-          STATE: ${{ inputs.app_key }}-upstream.json
+          APP_KEY: ${{ inputs.app_key }}
           LATEST: ${{ steps.up.outputs.tag }}
         run: |
           set -euo pipefail
-          printf '{\n  "published_tag": "%s",\n  "checked_at": "%s"\n}\n' \
-            "$LATEST" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" > "$STATE"
+          STATE="${APP_KEY}-upstream.json"
+          jq -n --arg seen "$LATEST" --arg dispatched "$LATEST" \
+            --arg at "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+            '{last_seen_tag: $seen, last_dispatched_tag: $dispatched, checked_at: $at}' \
+            > "$STATE"
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add "$STATE"
+          if git diff --staged --quiet; then
+            echo "记账无变化"; exit 0
+          fi
           git commit -m "chore: 记录上游 ${LATEST} 已触发构建"
           git push

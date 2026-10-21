@@ -40,6 +40,7 @@
 - 资产走 Release 而不是 git 提交，仓库体积始终保持小巧。
 
 > Release tag 必须带应用名前缀（`<App>-v<version>`）：多应用共仓时这是防 tag 相撞的唯一手段。
+> `_build-fpk.yml` 在未显式传 `release_tag` 时会默认生成 `<App>-v<version>`，并在 release job 里校验前缀。
 
 ---
 
@@ -68,7 +69,8 @@
 本仓库 tools/scaffold-lifecycle.sh \
   --pkg-dir apps/MyApp/package --app MyApp --prefix MYAPP --port 26800 \
   --health /healthz --mode entry --entry dist/server/index.mjs \
-  --launch 'exec "$NODE_BIN" --max-old-space-size="${MAX_OLD_SPACE:-512}" "$ENTRY"' \
+  --runtime-bin /var/apps/nodejs_v24/target/bin/node \
+  --launch 'exec "$RUNTIME_BIN" --max-old-space-size="${MAX_OLD_SPACE:-512}" "$ENTRY"' \
   --own-bins 'bin/helper' \
   --save-dir '/vol1/@appshare/MyApp/downloads' \
   --state-paths 'data home tmp config.env'
@@ -141,8 +143,8 @@ fnpack create MyApp --template docker
 
 ### 4. 触发构建
 
-集中式模型下**不需要配任何 secret** —— 发布发生在 FnDepot 自己的仓库里，
-`GITHUB_TOKEN` 就够了。在 FnDepot 仓库跑 Actions：
+集中式模型下**不需要额外配置 PAT secret** —— 发布发生在 FnDepot 自己的仓库里，
+`GITHUB_TOKEN` 以 `FNDEPOT_TOKEN` 的形式传给可复用 workflow 就够了。在 FnDepot 仓库跑 Actions：
 
 ```bash
 # 手动触发：Actions → Build App → Run workflow
@@ -157,23 +159,58 @@ fnpack create MyApp --template docker
 
 | 文件 | 作用 |
 |---|---|
-| [`_build-fpk.yml`](.github/workflows/_build-fpk.yml) | 通用构建：矩阵 → fnpack build → Release → 调发布 |
-| [`_publish-index.yml`](.github/workflows/_publish-index.yml) | 写回索引：防呆 + platform 并集 + README 同步 + verify 门禁 |
+| [`_build-fpk.yml`](.github/workflows/_build-fpk.yml) | 通用构建：矩阵产 payload → 单 x86 统一 fnpack 打包 → Release → 调发布 |
+| [`_publish-index.yml`](.github/workflows/_publish-index.yml) | 写回索引：防呆 + platform 跟随版本 + README 同步 + verify 门禁 + 并发重试 |
 | [`_auto-upstream.yml`](.github/workflows/_auto-upstream.yml) | 可选：每周巡检上游 release，有新版自动触发 |
 
-`_build-fpk.yml` 的 `template_dir` 指向**模板目录本身**（不再拼 app_key），
-`build_script` 指向应用自己的 payload 生产线。调用方例子见
+`_build-fpk.yml` 的 `template_dir` 指向**模板目录本身**（不再拼 app_key；留空时默认 `packaging/<app_key>`），
+`build_script` 指向应用自己的 payload 生产线。集中式调用方显式传 `apps/<App>/package`。调用方例子见
 [examples/depot-build-app.yml](examples/depot-build-app.yml)。
 
 `_build-fpk.yml` 在「校验契约」之后会跑 [`tools/lint-package.sh`](tools/lint-package.sh)：
 卸载向导、`keep` 默认、路径护栏、`/proc` 身份校验、热门端口默认值这些规范项不过，构件不会产出。
 
-### `_publish-index.yml` 比常见做法多做的四件事
+### `_publish-index.yml` 比常见做法多做的五件事
 
 1. **首次收录防呆** —— app 键不存在直接失败，而不是静默写出缺必填字段的空壳
-2. **`platform` 取并集** —— 先发 x86 再发 arm 时自动补上 `arm`，否则 arm 设备看不到应用
-3. **README 收录表同步** —— `verify.py` 会校验表里版本 == `max(releases)`
+2. **`platform` 跟随最新 release** —— 首次发 x86 再发 arm 会自动补上；新版本若只发 x86，也不会继续宣称支持 arm
+3. **README 收录表同步** —— `verify.py` 用 `version_key` 按数值/预发布规则校验最新版
 4. **推送前 `verify.py --no-net` 门禁** —— 结构不过就地失败，绝不推坏索引
+5. **并发保护** —— 同仓库索引写入串行化，push 冲突时有限 `fetch + rebase` 重试
+
+---
+
+## 工厂自检（CI）
+
+```bash
+bash tests/run.sh          # 本地：shell/YAML/JSON + lint 正反例 + scaffold + 真 fnpack 出包
+```
+
+`.github/workflows/ci.yml` 在 push/PR 时跑同一套：
+`shellcheck -S error` + `bash tests/run.sh`。模板/门禁/生成器的改动必须带回归用例，
+不要只改文档——`tests/fixtures/` 里有可直接跑的正例包。
+
+---
+
+## 许可
+
+本仓库的脚本与文档采用 MIT（见 `LICENSE`）。`tools/fnpack-linux-*` 是飞牛官方工具，
+其再分发条款以官方为准；如果你的使用场景不允许随仓库分发二进制，请删除它们并改为
+在 CI 里从官方地址下载 + 校验 SHA256。
+
+---
+
+## 兼容性基线（发版前请按目标设备实测）
+
+| 项 | 当前假设 | 需要确认 |
+|---|---|---|
+| fnOS | 1.x / fpk V2 | 目标设备的具体小版本 |
+| 构建 runner | `ubuntu-24.04`，glibc 2.39 | 若 fnOS 是 Debian 12（glibc 2.36），带 CGO/原生模块的产物可能报 `GLIBC_2.39 not found`；纯静态 Go 无碍。必要时改 `debian:12` 容器构建 |
+| arm64 runner | `ubuntu-24.04-arm` | 取决于 GitHub 计划/仓库可见性；不可用时改单架构或自托管 |
+| Node | 默认 `/var/apps/nodejs_v24/target/bin/node`，可用 `--runtime-bin` 覆盖 | fnOS 升级 Node 大版本时同步改 |
+| Python | `--mode entry --runtime-bin /var/apps/python312/target/bin/python3` | 需要 Python 官方运行时已安装 |
+
+> 这一节不是“保证”，是把隐含假设显式化；换目标机型时先跑 `tests/run.sh` 和真机 `accept.sh`。
 
 ---
 
@@ -188,10 +225,12 @@ fnpack create MyApp --template docker
 
 > ⚠️ **两个架构的 fnpack 版本不同**（1.2.3 / 1.2.4）。
 > 官方对 arm64 从未发布过工件（`static2.fnnas.com/fnpack/fnpack-1.2.3-linux-arm64` → 404），
-> 设备自带的是 1.2.4。出厂包内容一致，但如果你要求严格同版本，需自行取舍。
+> 设备自带的是 1.2.4。**当前 CI 只用 amd64 1.2.3 统一打包**；arm64 1.2.4 仅随仓库提供，
+> 便于在飞牛设备本地使用，不参与流水线。
 
 `fnpack` 的主机架构与**包内产物架构无关**（它只做打包，不执行包内文件），所以理论上单机可打双架构；
-本流水线仍用矩阵，是为了让「编译」这一步也落在原生架构上（避免 CGO / 原生模块跨架构问题）。
+本流水线仍用矩阵，是为了让「编译」这一步也落在原生架构上（避免 CGO / 原生模块跨架构问题）；
+打包阶段统一在 x86 runner 上用 amd64 1.2.3 完成，所以不需要 qemu。
 
 > ⚠️ **两个版本行为有差异**：1.2.4（arm64，设备自带）会校验 manifest 的版本号必须是
 > `x.y.z[-r]`（`r` 为整数），`2.0.0-beta.49` 直接 `Packing failed`；1.2.3（amd64）没有这个校验。

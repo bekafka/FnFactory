@@ -35,14 +35,15 @@ CI 的「校验打包规范」步骤跑同一条脚本。它只检查规范里�
   --health /healthz \
   --mode entry \
   --entry dist/server/index.mjs \
-  --launch 'exec "$NODE_BIN" --max-old-space-size="${MAX_OLD_SPACE:-512}" "$ENTRY"' \
+  --runtime-bin /var/apps/nodejs_v24/target/bin/node \
+  --launch 'exec "$RUNTIME_BIN" --max-old-space-size="${MAX_OLD_SPACE:-512}" "$ENTRY"' \
   --own-bins 'bin/helper' \
   --save-dir '/vol1/@appshare/MyApp/downloads' \
   --state-paths 'data home tmp config.env'
 ```
 
 脚本做的事：拷模板 → 替换占位符 → 生成后校验（`bash -n`、JSON 解析）→ 已存在的文件默认不覆盖（要覆盖加 `--force`）。
-生成完**仍然要自己读一遍**「应用定制区」和 `@APP_ENV@` / `@E2E@` 这几处 TODO。
+生成完**仍然要自己读一遍**「应用定制区」和 `TODO(app-env)` / `TODO(first-run)` / `TODO(e2e)` 这几处 TODO。
 
 不想用脚本就手工拷 `templates/` 下的文件，把 `@...@` 全部替换掉，效果一样。
 

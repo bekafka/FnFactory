@@ -1,0 +1,29 @@
+# ============================================================================
+# 自动跟版调用范例（放在应用仓库/索引仓库的 .github/workflows/ 下）
+# ============================================================================
+# 每 6 小时巡检一次上游；发现新版且本地 Release 不存在时触发布建。
+# 需要 secrets.UPSTREAM_TOKEN：对当前仓库有 actions:write 的 PAT。
+# 读取公开上游 release 只用 github.token，不会滥用 PAT。
+# ============================================================================
+name: Auto Release
+
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  watch:
+    uses: bekafka/FnFactory/.github/workflows/_auto-upstream.yml@v1
+    with:
+      app_key:            Magpie
+      upstream_repo:      yetone/magpie
+      upstream_asset_re:  'linux-(amd64|arm64)'
+      build_workflow:     'build-app.yml'
+      build_app_key:      Magpie
+      release_tag_pattern: 'Magpie-v{version}'
+    secrets:
+      UPSTREAM_TOKEN: ${{ secrets.UPSTREAM_TOKEN }}

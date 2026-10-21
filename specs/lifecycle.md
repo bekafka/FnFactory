@@ -19,7 +19,7 @@
 ```bash
 check_identity() {
   exe="$(resolve_path "$(readlink /proc/$1/exe)")"
-  want="$(resolve_path "$NODE_BIN")"      # 或包内二进制
+  want="$(resolve_path "$RUNTIME_BIN")"    # 或包内二进制
   [ "$exe" = "$want" ] || return 1
   cwd="$(resolve_path "$(readlink /proc/$1/cwd)")"
   [ "$cwd" = "$(resolve_path "$APPDEST")" ] || return 1
@@ -84,6 +84,7 @@ curl -fsS -m 2 "http://127.0.0.1:$PORT/healthz"
 后果：同机其他应用用户（媒体服务器、同步工具）读不到刚生成的文件。
 
 做法：启动时把数据目录修成 `0755`、文件修成 `0644`，再起一个**跟随主进程存活**的轮询修新文件；
+第一次全量扫，之后用 `$PKGVAR/.perm-scan` 时间戳只处理新增/更新文件，避免每 30s 遍历几万文件。
 用两个配置项控制（`MYAPP_FIX_PERMISSIONS` / `MYAPP_SAVE_DIRS`），允许用户关掉。
 只对"用户数据目录"做，不碰应用私有目录。
 

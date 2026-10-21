@@ -1,11 +1,13 @@
 name: Publish Index (reusable)
 
-# 写回 FnDepot 索引（分散模型：只写元数据，.fpk 资产留在应用自己的 Release）。
+# 写回 FnDepot 索引（集中式模型：只写元数据，.fpk 资产留在调用方 Release）。
 #
-# 与 shuangji66/buildbot 的 Publish.yaml 相比，本模块多做了三件必要的事：
+# 关键行为：
 #   ① 首次收录防呆     —— app 键不存在时直接失败，而不是静默写出缺必填字段的空壳
-#   ② platform 取并集  —— 后发架构不会被漏掉，arm 设备才看得到应用
+#   ② platform 跟随版本 —— 以最新 release 的 packages 键为准，避免“应用说支持 arm、
+#                          但最新版没有 arm 包”的假可用
 #   ③ verify 门禁      —— 结构不过就地失败，绝不推坏索引
+#   ④ 并发保护        —— 同仓库索引写入串行化，push 冲突时有限重试
 
 on:
   workflow_call:
@@ -45,22 +47,53 @@ on:
         required: true
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: fndepot-index-${{ inputs.fndepot_repo }}
+  cancel-in-progress: false
 
 jobs:
   publish:
     name: 写入 FnDepot 索引
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     permissions:
-      contents: write
+      contents: read
     steps:
-      - name: 检出索引仓库
+      - name: 校验输入
         env:
-          TOKEN: ${{ secrets.FNDEPOT_TOKEN }}
-          REPO: ${{ inputs.fndepot_repo }}
+          APP: ${{ inputs.app_key }}
+          VERSION: ${{ inputs.version }}
+          TAG: ${{ inputs.release_tag }}
+          SRC_REPO: ${{ inputs.source_repo }}
+          FNDEPOT_REPO: ${{ inputs.fndepot_repo }}
         run: |
           set -euo pipefail
-          git clone --depth 1 "https://x-access-token:${TOKEN}@github.com/${REPO}.git" fndepot
+          printf '%s' "$APP" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$' || {
+            echo "::error::app_key 非法：$APP"; exit 1; }
+          printf '%s' "$VERSION" | grep -Eq '^[0-9][0-9A-Za-z._+-]*$' || {
+            echo "::error::version 非法：$VERSION"; exit 1; }
+          printf '%s' "$TAG" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._/-]*$' || {
+            echo "::error::release_tag 非法：$TAG"; exit 1; }
+          case "$TAG" in *..*) echo "::error::release_tag 不能包含 .."; exit 1 ;; esac
+          printf '%s' "$SRC_REPO" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' || {
+            echo "::error::source_repo 必须是 owner/repo：$SRC_REPO"; exit 1; }
+          printf '%s' "$FNDEPOT_REPO" | grep -Eq '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' || {
+            echo "::error::fndepot_repo 必须是 owner/repo：$FNDEPOT_REPO"; exit 1; }
+
+      - name: 检出索引仓库
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.fndepot_repo }}
+          token: ${{ secrets.FNDEPOT_TOKEN }}
+          path: fndepot
+          fetch-depth: 1
+          persist-credentials: true
+
+      - name: 配置 git 身份
+        run: |
+          set -euo pipefail
           cd fndepot
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -105,7 +138,6 @@ jobs:
           fi
 
           PACKAGES='{}'
-          ARCHES='[]'
           FOUND=0
 
           for arch in x86 arm all; do
@@ -133,7 +165,6 @@ jobs:
             PACKAGES=$(echo "$PACKAGES" | jq \
               --arg arch "$arch" --arg url "$url" --arg sha "$sha256" --argjson size "$size" \
               '.[$arch] = {download_url: $url, sha256: $sha, size: $size}')
-            ARCHES=$(echo "$ARCHES" | jq --arg arch "$arch" '. + [$arch]')
             FOUND=$((FOUND + 1))
           done
 
@@ -147,20 +178,16 @@ jobs:
             echo "packages<<__PKG__"
             echo "$PACKAGES"
             echo "__PKG__"
-            echo "arches<<__ARCH__"
-            echo "$ARCHES"
-            echo "__ARCH__"
           } >> "$GITHUB_OUTPUT"
           echo "共匹配 $FOUND 个架构"
 
-      # ── ② 写版本节点 + platform 取并集 ──────────────────────────────
+      # ── ② 写版本节点 + platform 跟随该版本的 packages ──────────────
       - name: 写入 releases.<version>
         env:
           APP: ${{ inputs.app_key }}
           VERSION: ${{ inputs.version }}
           CHANGELOG: ${{ inputs.changelog }}
           PACKAGES: ${{ steps.assets.outputs.packages }}
-          ARCHES: ${{ steps.assets.outputs.arches }}
         run: |
           set -euo pipefail
           cd fndepot
@@ -172,17 +199,17 @@ jobs:
              '.apps[$a].releases[$v] = {changelog: $cl, updated_at: $t, packages: $pkgs}' \
              fnpack.json > fnpack.json.tmp && mv fnpack.json.tmp fnpack.json
 
-          # platform 取并集（platform==["all"] 时保持 all）
-          jq --arg a "$APP" --argjson archs "$ARCHES" '
-              .apps[$a].platform =
-                (if ((.apps[$a].platform // []) == ["all"]) then ["all"]
-                 else (((.apps[$a].platform // []) + $archs) | unique) end)' \
+          # platform 以最新 release 的实际 packages 键为准。
+          # 若先发 x86 再发 arm，第二次会自动补成 x86+arm；若新版本只发 x86，
+          # 也不会继续宣称支持 arm（避免 arm 设备看到装不上的版本）。
+          jq --arg a "$APP" --arg v "$VERSION" '
+              .apps[$a].platform = (.apps[$a].releases[$v].packages | keys)' \
              fnpack.json > fnpack.json.tmp && mv fnpack.json.tmp fnpack.json
 
           echo "--- 写入后的节点 ---"
           jq --arg a "$APP" '.apps[$a] | {platform, releases: (.releases | keys)}' fnpack.json
 
-      # ── ③ README 收录表同步（verify.py 会校验表里的版本 == max(releases)）──
+      # ── ③ README 收录表同步（verify.py 用同一个 version_key 校验最新版）──
       - name: 同步 README 收录表
         env:
           APP: ${{ inputs.app_key }}
@@ -191,11 +218,19 @@ jobs:
           cd fndepot
           python3 - "$APP" <<'PY'
           import json, re, sys
+
+          def version_key(value):
+              parts = re.split(r"[.+-]", value)
+              key = [(0, int(p)) if p.isdigit() else (1, p) for p in parts]
+              if "-" not in value:
+                  key.append((2, ""))  # 稳定版排在 prerelease 之后
+              return key
+
           app = sys.argv[1]
           idx = json.load(open("fnpack.json", encoding="utf-8"))
           node = idx["apps"][app]
           releases = node.get("releases") or {}
-          latest = max(releases) if releases else ""
+          latest = max(releases, key=version_key) if releases else ""
           plats = node.get("platform") or []
           arch_disp = "all" if plats == ["all"] else " / ".join(sorted(plats))
 
@@ -221,7 +256,6 @@ jobs:
 
       - name: 提交并推送
         env:
-          TOKEN: ${{ secrets.FNDEPOT_TOKEN }}
           REPO: ${{ inputs.fndepot_repo }}
           APP: ${{ inputs.app_key }}
           VERSION: ${{ inputs.version }}
@@ -234,5 +268,17 @@ jobs:
           fi
           git commit -m "chore: ${APP} 更新到 ${VERSION}"
           BRANCH=$(git rev-parse --abbrev-ref HEAD)
-          git push "https://x-access-token:${TOKEN}@github.com/${REPO}.git" "$BRANCH"
-          echo "✓ 已推送 ${REPO}@${BRANCH}: $(git rev-parse --short HEAD)"
+
+          # 同仓库并发发布时，后到的 commit 可能 non-fast-forward。
+          # 先 fetch + rebase，再有限重试；不要 --force。
+          for i in 1 2 3; do
+            if git push origin "$BRANCH"; then
+              echo "✓ 已推送 ${REPO}@${BRANCH}: $(git rev-parse --short HEAD)"
+              exit 0
+            fi
+            [ "$i" -eq 3 ] && { echo "::error::索引推送重试 3 次仍失败"; exit 1; }
+            echo "push 失败，第 $i 次重试前先 rebase"
+            git fetch origin "$BRANCH"
+            git rebase "origin/$BRANCH" || { git rebase --abort; exit 1; }
+            sleep $((i * 5))
+          done

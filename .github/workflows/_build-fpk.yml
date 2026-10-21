@@ -3,22 +3,36 @@ name: Build FPK (reusable)
 # 通用打包流水线。三类应用（二进制 / Node-Python / Docker）都用这一条，
 # 差异只在应用仓库里的 packaging/build.sh 产出了什么。
 #
+# 架构：
+#   build   job：按矩阵在原生 runner 上产出 payload（不执行 fnpack）
+#   package job：在单个 x86 runner 上用 amd64 fnpack 统一打包两个架构
+#                —— fnpack 只打包、不执行包内文件，因此不需要 qemu
+#   release job：创建 Release 并上传 .fpk
+#   publish job：写回索引（可关闭）
+#
 # 调用方式（应用仓库的 .github/workflows/release.yml）：
 #   jobs:
 #     build:
-#       permissions: { contents: write }
-#       uses: bekafka/FnFactory/.github/workflows/_build-fpk.yml@main
+#       permissions: { contents: write }  # release job 需要写 Release
+#       uses: bekafka/FnFactory/.github/workflows/_build-fpk.yml@v1
 #       with:
 #         app_key:      MyApp
-#         version:      ${{ github.ref_name }}      # 或从 tag 解析
+#         version:      "1.2.3"              # 不带前导 v
 #         changelog:    "本次更新说明"
+#         template_dir: packaging/MyApp
+#         build_script: packaging/build.sh
 #         publish:      true
 #       secrets:
 #         FNDEPOT_TOKEN: ${{ secrets.FNDEPOT_TOKEN }}
 #
 # 应用仓库必须提供的契约（见 examples/）：
-#   packaging/<App>/manifest, config/, cmd/, wizard/, app/   ← fnOS 包模板
-#   packaging/build.sh                                       ← 产出产物到 $PAYLOAD_DIR
+#   <template_dir>/manifest, config/, cmd/, wizard/, app/   ← fnOS 包模板
+#   <build_script>                                          ← 产出产物到 $PAYLOAD_DIR
+#
+# 安全约定：
+#   · build job 只有 contents: read，build.sh 不应拿到可写 token；
+#   · 所有 inputs 先经 env + 白名单校验，再进入 shell；
+#   · 发布/写索引在独立 job 中，只有那里才给 contents: write。
 
 on:
   workflow_call:
@@ -28,30 +42,30 @@ on:
         required: true
         type: string
       version:
-        description: '包版本号（写进 manifest 的 version）'
+        description: '包版本号（写进 manifest 的 version；不带前导 v）'
         required: true
         type: string
       changelog:
-        description: '更新日志（支持中文）'
+        description: '更新日志（支持中文；多行会被规范化为单行）'
         required: true
         type: string
       matrix:
-        description: '构建矩阵 JSON（含 include 数组，每项需 os/arch/platform）'
+        description: '构建矩阵 JSON（include 数组，每项需 os/arch/platform；arch=amd64|arm64，platform=x86|arm|all）'
         required: false
         type: string
         default: '{"include":[{"os":"ubuntu-24.04","arch":"amd64","platform":"x86"},{"os":"ubuntu-24.04-arm","arch":"arm64","platform":"arm"}]}'
       template_dir:
-        description: '包模板目录本身（含 manifest/cmd/wizard/config；相对调用方仓库根）'
+        description: '包模板目录本身（含 manifest/cmd/wizard/config）；留空 = packaging/<app_key>'
         required: false
         type: string
-        default: 'packaging/<App>'
+        default: ''
       build_script:
         description: '产出 payload 的脚本路径（相对调用方仓库根）'
         required: false
         type: string
         default: 'packaging/build.sh'
       release_tag:
-        description: 'Release tag；留空则用 v<version>'
+        description: 'Release tag；留空则用 <app_key>-v<version>'
         required: false
         type: string
         default: ''
@@ -61,15 +75,40 @@ on:
         type: boolean
         default: true
       fndepot_repo:
-        description: '索引仓库（分散模型：只存元数据，资产留在本仓库）'
+        description: '索引仓库（集中式模型：只存元数据，资产留在本仓库）'
         required: false
         type: string
         default: 'bekafka/FnDepot'
       factory_repo:
-        description: '打包厂仓库（提供 fnpack 工具）。⚠️ 若改仓库名，本文件两处必须同步改：这个默认值 + publish job 的 uses:'
+        description: '打包厂仓库（提供 fnpack 工具）'
         required: false
         type: string
         default: 'bekafka/FnFactory'
+      factory_ref:
+        description: '打包厂 ref（建议固定到 tag/commit，不要长期用 main）'
+        required: false
+        type: string
+        default: 'main'
+      fetch_depth:
+        description: '检出应用仓库的 fetch-depth；只需要打包时 1 即可'
+        required: false
+        type: number
+        default: 1
+      needs_go:
+        description: 'build.sh 需要 Go 工具链时设为 true'
+        required: false
+        type: boolean
+        default: false
+      go_version:
+        description: 'setup-go 的版本；默认 stable，建议改为 go.mod 的版本'
+        required: false
+        type: string
+        default: 'stable'
+      go_cache:
+        description: '是否启用 setup-go 缓存'
+        required: false
+        type: boolean
+        default: true
     outputs:
       tag:
         description: '本次发布使用的 tag'
@@ -84,153 +123,256 @@ on:
         required: false
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: fpk-${{ github.repository }}-${{ inputs.app_key }}-${{ inputs.version }}
+  cancel-in-progress: false
 
 jobs:
   # ══════════════════════════════════════════════════════════════════
   build:
-    name: 打包 ${{ matrix.platform }}
+    name: 构建 payload ${{ matrix.platform }}
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(inputs.matrix) }}
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
     steps:
       - name: 检出应用仓库
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: ${{ inputs.fetch_depth }}
+          persist-credentials: false
 
-      - name: 检出打包厂（提供 fnpack 工具）
+      - name: 检出打包厂（提供 lint 工具）
         uses: actions/checkout@v4
         with:
           repository: ${{ inputs.factory_repo }}
-          ref: main
+          ref: ${{ inputs.factory_ref }}
           path: .factory
+          persist-credentials: false
 
-      - name: 校验契约
+      - name: 校验输入与契约
+        env:
+          APP_KEY: ${{ inputs.app_key }}
+          VERSION: ${{ inputs.version }}
+          TEMPLATE_DIR: ${{ inputs.template_dir }}
+          BUILD_SCRIPT: ${{ inputs.build_script }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          MATRIX: ${{ inputs.matrix }}
         run: |
           set -euo pipefail
-          # template_dir 就是模板目录本身（含 manifest/cmd/wizard/…）
-          [ -d "${{ inputs.template_dir }}" ] || {
-            echo "::error::缺少包模板目录 ${{ inputs.template_dir }}"; exit 1; }
-          [ -f "${{ inputs.template_dir }}/manifest" ] || {
+
+          # app_key 会进入路径/资产名/tag，必须限制为安全字符
+          printf '%s' "$APP_KEY" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$' || {
+            echo "::error::app_key 只能包含字母、数字、点、下划线、连字符：$APP_KEY"; exit 1; }
+          # 版本号会进入路径/URL；拒绝前导 v、斜杠、空白
+          printf '%s' "$VERSION" | grep -Eq '^[0-9][0-9A-Za-z._+-]*$' || {
+            echo "::error::version 不合法（期望 x.y.z[-suffix]，不带前导 v）：$VERSION"; exit 1; }
+
+          TEMPLATE_DIR="${TEMPLATE_DIR:-packaging/$APP_KEY}"
+          case "$TEMPLATE_DIR" in
+            /*|*..*) echo "::error::template_dir 必须是仓库内相对路径：$TEMPLATE_DIR"; exit 1 ;;
+          esac
+          case "$BUILD_SCRIPT" in
+            /*|*..*) echo "::error::build_script 必须是仓库内相对路径：$BUILD_SCRIPT"; exit 1 ;;
+          esac
+          [ -d "$TEMPLATE_DIR" ] || {
+            echo "::error::缺少包模板目录 $TEMPLATE_DIR"; exit 1; }
+          [ -f "$TEMPLATE_DIR/manifest" ] || {
             echo "::error::模板里缺少 manifest"; exit 1; }
-          [ -f "${{ inputs.build_script }}" ] || {
-            echo "::error::缺少构建脚本 ${{ inputs.build_script }}"; exit 1; }
-          echo "✓ 契约完整"
+          [ -f "$BUILD_SCRIPT" ] || {
+            echo "::error::缺少构建脚本 $BUILD_SCRIPT"; exit 1; }
+
+          if [ -n "$RELEASE_TAG" ]; then
+            printf '%s' "$RELEASE_TAG" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._/-]*$' || {
+              echo "::error::release_tag 含非法字符：$RELEASE_TAG"; exit 1; }
+          fi
+
+          MATRIX="$MATRIX" python3 - <<'PY'
+          import json, os
+          raw = os.environ["MATRIX"]
+          try:
+              data = json.loads(raw)
+          except Exception as exc:
+              raise SystemExit(f"matrix 不是合法 JSON: {exc}")
+          items = data.get("include")
+          if not isinstance(items, list) or not items:
+              raise SystemExit("matrix.include 必须是非空数组")
+          seen = set()
+          for item in items:
+              if not isinstance(item, dict):
+                  raise SystemExit("matrix.include 的每一项必须是对象")
+              if not item.get("os"):
+                  raise SystemExit("matrix 项缺少 os")
+              if item.get("arch") not in ("amd64", "arm64"):
+                  raise SystemExit(f"matrix arch 只能是 amd64/arm64: {item.get('arch')!r}")
+              if item.get("platform") not in ("x86", "arm", "all"):
+                  raise SystemExit(f"matrix platform 只能是 x86/arm/all: {item.get('platform')!r}")
+              if item["platform"] in seen:
+                  raise SystemExit(f"matrix platform 重复：{item['platform']}")
+              seen.add(item["platform"])
+          print("✓ matrix 合法")
+          PY
+
+          echo "TEMPLATE_DIR=$TEMPLATE_DIR" >> "$GITHUB_ENV"
+          echo "BUILD_SCRIPT=$BUILD_SCRIPT" >> "$GITHUB_ENV"
+          echo "✓ 契约完整：app=$APP_KEY version=$VERSION template=$TEMPLATE_DIR"
 
       - name: 校验打包规范（specs/）
         run: |
           set -euo pipefail
-          bash .factory/tools/lint-package.sh "${{ inputs.template_dir }}"
+          bash .factory/tools/lint-package.sh "$TEMPLATE_DIR"
 
-      - name: 准备 Go 工具链（应用在 packaging/needs-go 里声明需要）
-        # runner 自带的 Go 可能比 go.mod 要求的旧（Magpie 要 1.26.3）：
-        # GOTOOLCHAIN=auto 能自己下载，但每次 ~60MB；声明过的应用直接装 stable。
-        if: hashFiles(format('apps/{0}/packaging/needs-go', inputs.app_key)) != ''
+      - name: 准备 Go 工具链（应用声明需要时）
+        if: inputs.needs_go || hashFiles(format('apps/{0}/packaging/needs-go', inputs.app_key)) != ''
         uses: actions/setup-go@v5
         with:
-          go-version: 'stable'
-          cache: false
+          go-version: ${{ inputs.go_version }}
+          cache: ${{ inputs.go_cache }}
+
+      - name: 组装工作区（模板 + payload）
+        env:
+          APP_KEY: ${{ inputs.app_key }}
+          ARCH: ${{ matrix.arch }}
+          PLATFORM: ${{ matrix.platform }}
+          VERSION: ${{ inputs.version }}
+          REPO_ROOT: ${{ github.workspace }}
+          PAYLOAD_DIR: ${{ github.workspace }}/build_workspace/${{ inputs.app_key }}/app
+        run: |
+          set -euo pipefail
+          rm -rf build_workspace && mkdir -p build_workspace
+          cp -r "$TEMPLATE_DIR" "build_workspace/$APP_KEY"
+          mkdir -p "$PAYLOAD_DIR"
+
+          # 由应用自己的脚本产出 payload —— 三类应用的唯一差异点就在这里
+          bash "$BUILD_SCRIPT"
+
+          if ! find "$PAYLOAD_DIR" -type f -print -quit | grep -q .; then
+            echo "::error::build.sh 没有向 PAYLOAD_DIR 写入任何文件：$PAYLOAD_DIR"
+            exit 1
+          fi
+          echo "--- payload 内容（前 40 个文件）---"
+          find "$PAYLOAD_DIR" -type f | head -40 || true
+          echo "--- payload 大小 ---"
+          du -sh "$PAYLOAD_DIR" || true
+
+      - name: 上传 payload
+        uses: actions/upload-artifact@v4
+        with:
+          name: payload-${{ matrix.platform }}-${{ matrix.arch }}
+          path: build_workspace/${{ inputs.app_key }}
+          if-no-files-found: error
+
+  # ══════════════════════════════════════════════════════════════════
+  package:
+    name: 统一打包
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: 检出打包厂（fnpack + manifest 渲染）
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.factory_repo }}
+          ref: ${{ inputs.factory_ref }}
+          path: .factory
+          persist-credentials: false
+
+      - name: 下载所有 payload
+        uses: actions/download-artifact@v4
+        with:
+          pattern: payload-*
+          path: payloads
+          merge-multiple: false
 
       - name: 准备 fnpack 工具（带 sha256 校验）
         env:
           FNPACK_ARCH: amd64
         run: |
           set -euo pipefail
-          # fnpack 版本选择（2026-10-17 定案）：
-          #   · 1.2.4（设备自带的 arm64）会拒绝 "x.y.z-beta.N" 版本号（要求 x.y.z[-r]，r 为整数）
-          #   · 1.2.3（官方 amd64）没有这个校验
-          # 所以 arm64 包也统一用 amd64 1.2.3 —— 但 arm64 runner 执行不了 amd64 ELF，
-          # 需要 qemu-user 静态模拟（ubuntu runner 预装 binfmt 支持）。
-          if [ "$(uname -m)" = "x86_64" ]; then
-            cp ".factory/tools/fnpack-linux-amd64" ./fnpack
-          else
-            sudo apt-get update -qq && sudo apt-get install -y -qq qemu-user-static >/dev/null
-            cp ".factory/tools/fnpack-linux-amd64" ./fnpack
-          fi
+          cp ".factory/tools/fnpack-linux-amd64" ./fnpack
           chmod +x ./fnpack
           ACTUAL=$(sha256sum ./fnpack | awk '{print $1}')
-          EXPECTED=$(grep "fnpack-linux-${FNPACK_ARCH}$" .factory/tools/SHA256SUMS | awk '{print $1}')
-          if [ -n "$EXPECTED" ] && [ "$ACTUAL" != "$EXPECTED" ]; then
+          EXPECTED=$(awk -v name="fnpack-linux-${FNPACK_ARCH}" '$2 == name {print $1}' .factory/tools/SHA256SUMS)
+          [ -n "$EXPECTED" ] || {
+            echo "::error::tools/SHA256SUMS 里找不到 fnpack-linux-${FNPACK_ARCH}"; exit 1; }
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
             echo "::error::fnpack 哈希不符：期望 $EXPECTED 实际 $ACTUAL"; exit 1
           fi
           echo "✓ fnpack sha256=$ACTUAL"
-          ./fnpack --help >/dev/null 2>&1 || ./fnpack --help | head -2 || true
+          ./fnpack --help >/tmp/fnpack-help.txt 2>&1 || {
+            cat /tmp/fnpack-help.txt; echo "::error::fnpack 无法执行"; exit 1; }
 
-      - name: 组装工作区（模板 + payload）
+      - name: 打包所有架构
         env:
-          ARCH: ${{ matrix.arch }}
-          PLATFORM: ${{ matrix.platform }}
-          VERSION: ${{ inputs.version }}
-          PAYLOAD_DIR: ${{ github.workspace }}/build_workspace/${{ inputs.app_key }}/app
-        run: |
-          set -euo pipefail
-          rm -rf build_workspace && mkdir -p build_workspace
-          cp -r "${{ inputs.template_dir }}" "build_workspace/${{ inputs.app_key }}"
-          mv ./fnpack build_workspace/fnpack
-          mkdir -p "$PAYLOAD_DIR"
-
-          # 由应用自己的脚本产出 payload —— 三类应用的唯一差异点就在这里
-          bash "${{ inputs.build_script }}"
-
-          echo "--- payload 内容（前 40 个文件）---"
-          find "$PAYLOAD_DIR" -type f | head -40 || true
-          echo "--- payload 大小 ---"
-          du -sh "$PAYLOAD_DIR" || true
-
-      - name: 注入 manifest 占位符
-        env:
-          PLATFORM: ${{ matrix.platform }}
+          APP_KEY: ${{ inputs.app_key }}
           VERSION: ${{ inputs.version }}
           CHANGELOG: ${{ inputs.changelog }}
         run: |
           set -euo pipefail
-          MANIFEST="build_workspace/${{ inputs.app_key }}/manifest"
-          # changelog 可能多行/含中文/含特殊字符：用 python 做字符串替换，绕开 sed 的
-          # 分隔符与转义地狱（changelog 里出现 / 或 & 会让 sed 表达式直接报错）。
-          VERSION="$VERSION" PLATFORM="$PLATFORM" CHANGELOG="$CHANGELOG" python3 - "$MANIFEST" <<'PYEOF'
-          import os, sys
-          path = sys.argv[1]
-          text = open(path, encoding="utf-8").read()
-          for key in ("VERSION", "PLATFORM", "CHANGELOG"):
-              text = text.replace("${%s}" % key, os.environ[key])
-          open(path, "w", encoding="utf-8").write(text)
-          PYEOF
-          echo "--- 注入后的 manifest ---"; cat "$MANIFEST"
+          shopt -s nullglob
+          dirs=(payloads/payload-*)
+          [ "${#dirs[@]}" -gt 0 ] || { echo "::error::没有下载到 payload"; exit 1; }
 
-      - name: fnpack build 并规范化资产名
-        env:
-          PLATFORM: ${{ matrix.platform }}
-          VERSION: ${{ inputs.version }}
-        run: |
-          set -euo pipefail
-          cd build_workspace
-          ./fnpack build "${{ inputs.app_key }}"
-          SRC_FPK=$(ls *.fpk | head -n1)
-          [ -n "$SRC_FPK" ] || { echo "::error::没有产出 .fpk"; exit 1; }
-          # 资产命名约定，必须与 _publish-index.yml 的 asset_pattern 对齐
-          OUT="../${{ inputs.app_key }}-${VERSION}-${PLATFORM}.fpk"
-          mv "$SRC_FPK" "$OUT"
-          ls -la "$OUT"
+          for dir in "${dirs[@]}"; do
+            name="$(basename "$dir")"
+            rest="${name#payload-}"
+            platform="${rest%%-*}"
+            arch="${rest#*-}"
 
-      - name: 上传 FPK artifact
+            rm -rf build_workspace
+            mkdir -p build_workspace
+            cp -r "$dir" "build_workspace/$APP_KEY"
+
+            APP_KEY="$APP_KEY" VERSION="$VERSION" PLATFORM="$platform" CHANGELOG="$CHANGELOG" \
+              python3 .factory/tools/render-manifest.py "build_workspace/$APP_KEY/manifest"
+
+            if ! ( cd build_workspace && ../fnpack build "$APP_KEY" 2>&1 | tee "/tmp/fnpack-${platform}-${arch}.log" ); then
+              echo "::error::fnpack 退出码非 0（$platform/$arch）"
+              exit 1
+            fi
+            grep -q 'Packing successfully' "/tmp/fnpack-${platform}-${arch}.log" || {
+              echo "::error::fnpack 没有报告 Packing successfully（$platform/$arch）"
+              exit 1
+            }
+            mapfile -t FPK < <(find build_workspace -maxdepth 1 -type f -name '*.fpk')
+            if [ "${#FPK[@]}" -ne 1 ]; then
+              echo "::error::期望恰好 1 个 .fpk（$platform/$arch），实际 ${#FPK[@]} 个"
+              exit 1
+            fi
+            mv "${FPK[0]}" "${APP_KEY}-${VERSION}-${platform}.fpk"
+            echo "✓ ${APP_KEY}-${VERSION}-${platform}.fpk"
+          done
+
+      - name: 上传 FPK
         uses: actions/upload-artifact@v4
         with:
-          name: fpk-${{ matrix.platform }}
-          path: ${{ inputs.app_key }}-${{ inputs.version }}-${{ matrix.platform }}.fpk
+          name: fpk-all
+          path: ${{ inputs.app_key }}-${{ inputs.version }}-*.fpk
           if-no-files-found: error
 
   # ══════════════════════════════════════════════════════════════════
   release:
     name: 创建 Release
-    needs: build
+    needs: package
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
     steps:
       - name: 检出应用仓库（gh release 需要仓库上下文）
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
 
       - name: 下载所有架构的 FPK
         uses: actions/download-artifact@v4
@@ -242,11 +384,16 @@ jobs:
       - name: 确定 tag
         id: tag
         env:
+          APP_KEY: ${{ inputs.app_key }}
           IN_TAG: ${{ inputs.release_tag }}
           VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          if [ -n "$IN_TAG" ]; then TAG="$IN_TAG"; else TAG="v${VERSION}"; fi
+          if [ -n "$IN_TAG" ]; then TAG="$IN_TAG"; else TAG="${APP_KEY}-v${VERSION}"; fi
+          case "$TAG" in
+            "${APP_KEY}-v"*) ;;
+            *) echo "::error::Release tag 必须以 ${APP_KEY}-v 开头（防止多应用撞 tag）：$TAG"; exit 1 ;;
+          esac
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG"
 
@@ -255,15 +402,20 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.tag.outputs.tag }}
           VERSION: ${{ inputs.version }}
+          CHANGELOG: ${{ inputs.changelog }}
         run: |
           set -euo pipefail
           ls -la dist
+          PRERELEASE=()
+          case "$VERSION" in *-*) PRERELEASE=(--prerelease) ;; esac
           if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG 已存在，覆盖资产（digest 会变，所以索引写在之后）"
+            echo "Release $TAG 已存在，更新 notes 并覆盖资产"
+            gh release edit "$TAG" --title "$TAG" --notes "$CHANGELOG"
           else
-            gh release create "$TAG" --title "v${VERSION}" --notes "版本 v${VERSION}"
+            gh release create "$TAG" --title "$TAG" --notes "$CHANGELOG" "${PRERELEASE[@]}"
           fi
           for f in dist/*.fpk; do
+            [ -e "$f" ] || { echo "::error::dist 里没有 .fpk"; exit 1; }
             gh release upload "$TAG" "$f" --clobber
           done
 
@@ -274,7 +426,7 @@ jobs:
     if: ${{ inputs.publish }}
     permissions:
       contents: write
-    uses: bekafka/FnFactory/.github/workflows/_publish-index.yml@main
+    uses: bekafka/FnFactory/.github/workflows/_publish-index.yml@v1
     with:
       app_key:      ${{ inputs.app_key }}
       version:      ${{ inputs.version }}

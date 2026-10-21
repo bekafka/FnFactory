@@ -1,0 +1,17 @@
+[
+  {
+    "stepTitle": "卸载 Fixture",
+    "items": [
+      {
+        "type": "radio",
+        "field": "wizard_uninstall_mode",
+        "label": "卸载方式",
+        "initValue": "keep",
+        "options": [
+          { "label": "保留配置", "value": "keep" },
+          { "label": "完全卸载", "value": "purge" }
+        ]
+      }
+    ]
+  }
+]

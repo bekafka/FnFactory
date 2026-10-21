@@ -1,11 +1,12 @@
 #!/bin/bash
 # ==============================================================================
-# 把 fpk-factory 的生命周期/卸载/验收模板拷进一个应用包，并替换占位符。
+# 把 FnFactory 的生命周期/卸载/验收模板拷进一个应用包，并替换占位符。
 #
-#   tools/scaffold-lifecycle.sh --pkg-dir packaging/MyApp --app MyApp \
+#   tools/scaffold-lifecycle.sh --pkg-dir apps/MyApp/package --app MyApp \
 #     --prefix MYAPP --port 26800 --health /healthz \
 #     --mode entry --entry dist/server/index.mjs \
-#     --launch 'exec "$NODE_BIN" --max-old-space-size="${MAX_OLD_SPACE:-512}" "$ENTRY"' \
+#     --runtime-bin /var/apps/nodejs_v24/target/bin/node \
+#     --launch 'exec "$RUNTIME_BIN" --max-old-space-size="${MAX_OLD_SPACE:-512}" "$ENTRY"' \
 #     --own-bins 'bin/helper' \
 #     --save-dir '/vol1/@appshare/MyApp/downloads' \
 #     --state-paths 'data home tmp config.env'
@@ -19,10 +20,10 @@ FACTORY_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 TEMPLATES="$FACTORY_DIR/templates"
 
 PKG_DIR=""; APP=""; PREFIX=""; PORT=""; MODE="entry"; ENTRY=""
-LAUNCH=""; OWN_BINS=""; HEALTH="/healthz"; SAVE_DIR=""
+RUNTIME_BIN=""; LAUNCH=""; OWN_BINS=""; HEALTH="/healthz"; SAVE_DIR=""
 STATE_PATHS="data home tmp config.env"; TESTS_DIR=""; FORCE=0; DRY=0
 
-usage() { sed -n '2,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -32,6 +33,7 @@ while [ $# -gt 0 ]; do
     --port)        PORT="${2:-}"; shift 2 ;;
     --mode)        MODE="${2:-}"; shift 2 ;;
     --entry)       ENTRY="${2:-}"; shift 2 ;;
+    --runtime-bin) RUNTIME_BIN="${2:-}"; shift 2 ;;
     --launch)      LAUNCH="${2:-}"; shift 2 ;;
     --own-bins)    OWN_BINS="${2:-}"; shift 2 ;;
     --health)      HEALTH="${2:-}"; shift 2 ;;
@@ -47,12 +49,32 @@ done
 
 [ -n "$PKG_DIR" ] && [ -n "$APP" ] && [ -n "$PREFIX" ] && [ -n "$PORT" ] || {
   echo "缺少 --pkg-dir/--app/--prefix/--port" >&2; usage; }
+[ -d "$PKG_DIR" ] || { echo "包目录不存在：$PKG_DIR" >&2; exit 2; }
 case "$MODE" in entry|binary) ;; *) echo "--mode 只能是 entry 或 binary" >&2; exit 2 ;; esac
+case "$APP" in
+  ''|*[!A-Za-z0-9._-]*) echo "--app 只能包含字母、数字、点、下划线、连字符：$APP" >&2; exit 2 ;;
+esac
+case "$PREFIX" in
+  ''|*[!A-Za-z0-9_]*) echo "--prefix 只能包含字母、数字、下划线：$PREFIX" >&2; exit 2 ;;
+esac
+case "$PORT" in
+  ''|*[!0-9]*) echo "--port 必须是数字：$PORT" >&2; exit 2 ;;
+esac
+[ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ] || {
+  echo "--port 必须在 1-65535：$PORT" >&2; exit 2; }
 
-[ -n "$ENTRY" ] || ENTRY="."
-[ -n "$LAUNCH" ] || LAUNCH='exec "$ENTRY"'
+if [ "$MODE" = "binary" ]; then
+  [ -n "$OWN_BINS" ] && [ "$OWN_BINS" != "." ] || {
+    echo "--mode binary 必须给 --own-bins（例如 bin/helper）" >&2; exit 2; }
+  [ -n "$LAUNCH" ] || LAUNCH='exec "$APPDEST/${OWN_BINS%% *}"'
+else
+  [ -n "$ENTRY" ] && [ "$ENTRY" != "." ] || {
+    echo "--mode entry 必须给 --entry（例如 dist/server/index.mjs）" >&2; exit 2; }
+  [ -n "$RUNTIME_BIN" ] || RUNTIME_BIN="/var/apps/nodejs_v24/target/bin/node"
+  [ -n "$LAUNCH" ] || LAUNCH='exec "$RUNTIME_BIN" "$ENTRY"'
+fi
 [ -n "$OWN_BINS" ] || OWN_BINS="."
-[ -n "$TESTS_DIR" ] || TESTS_DIR="$(cd "$PKG_DIR/../.." 2>/dev/null && pwd)/tests"
+[ -n "$TESTS_DIR" ] || TESTS_DIR="$(cd "$PKG_DIR/.." && pwd)/tests"
 
 if [ "$DRY" = "1" ]; then
   echo "dry-run: 将写入"
@@ -65,11 +87,11 @@ fi
 mkdir -p "$PKG_DIR/cmd" "$PKG_DIR/wizard" "$TESTS_DIR"
 
 python3 - "$TEMPLATES" "$PKG_DIR" "$TESTS_DIR" "$APP" "$PREFIX" "$MODE" "$ENTRY" \
-  "$LAUNCH" "$OWN_BINS" "$HEALTH" "$PORT" "$SAVE_DIR" "$STATE_PATHS" "$FORCE" <<'PY'
+  "$RUNTIME_BIN" "$LAUNCH" "$OWN_BINS" "$HEALTH" "$PORT" "$SAVE_DIR" "$STATE_PATHS" "$FORCE" <<'PY'
 import os, sys, json, pathlib
 
 (tpl_dir, pkg_dir, tests_dir, app, prefix, mode, entry,
- launch, own_bins, health, port, save_dir, state_paths, force) = sys.argv[1:15]
+ runtime_bin, launch, own_bins, health, port, save_dir, state_paths, force) = sys.argv[1:16]
 
 tpl_dir = pathlib.Path(tpl_dir)
 pkg_dir = pathlib.Path(pkg_dir)
@@ -83,6 +105,7 @@ subs = {
     "@PREFIX@": prefix.upper(),
     "@MODE@": mode,
     "@ENTRY@": entry,
+    "@RUNTIME_BIN@": runtime_bin,
     "@LAUNCH@": launch,
     "@OWN_BINS@": own_bins,
     "@HEALTH_PATH@": health,
@@ -143,8 +166,8 @@ fi
 cat <<MSG
 
 下一步（必做，脚本不会替你决定）：
-  1. 打开 $PKG_DIR/cmd/main，补「应用定制区」：@APP_ENV@ / @FIRST_RUN@ 两处 TODO。
-  2. 补 $TESTS_DIR/accept.sh 的 stage_e2e（真实业务断言），没有就让它 SKIP。
+  1. 打开 $PKG_DIR/cmd/main，补「应用定制区」：TODO(app-env) / TODO(first-run) 两处。
+  2. 补 $TESTS_DIR/accept.sh 的 stage_e2e（真实业务断言）；不补的话 accept all 会直接 FAIL。
   3. 安装向导里把默认端口设成 $PORT，并在 install_callback/config_callback 里写 $PKG_DIR 对应的 config.env。
   4. 真机跑：bash $TESTS_DIR/accept.sh all
 MSG

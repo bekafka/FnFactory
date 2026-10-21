@@ -1,0 +1,32 @@
+#!/bin/bash
+set -u
+APPNAME="Fixture"
+PKGVAR="${TRIM_PKGVAR:-/var/apps/$APPNAME/var}"
+APPDEST="${TRIM_APPDEST:-/var/apps/$APPNAME/target}"
+LOG_FILE="$PKGVAR/info.log"
+resolve_path() { readlink -f "$1" 2>/dev/null || printf '%s' "$1"; }
+check_identity() {
+  local pid="$1"
+  [ -r "/proc/$pid/exe" ] || return 1
+  [ "$(resolve_path "$(readlink "/proc/$pid/exe" 2>/dev/null)")" = "$(resolve_path "$APPDEST/bin/fixture")" ]
+}
+find_orphans() {
+  local pid
+  for pid in $(ls /proc 2>/dev/null | grep -E '^[0-9]+$'); do
+    check_identity "$pid" && printf '%s\n' "$pid"
+  done
+}
+rotate_logs() {
+  ROTATED="$PKGVAR/info.log.1"
+  [ -f "$LOG_FILE" ] && [ "$(stat -c%s "$LOG_FILE" 2>/dev/null || echo 0)" -gt 5242880 ] && mv -f "$LOG_FILE" "$LOG_FILE.1" 2>/dev/null || true
+  : > "$LOG_FILE"
+}
+wait_ready() {
+  curl -fsS -m 2 "http://127.0.0.1:${PORT:-26999}/healthz" >/dev/null 2>&1
+}
+case "${1:-}" in
+  start)  : ;;
+  stop)   for p in $(find_orphans); do kill "$p" 2>/dev/null || true; done ;;
+  status) check_identity "$(cat "$PKGVAR/app.pid" 2>/dev/null || echo 0)" && exit 3; exit 1 ;;
+  *)      echo "usage: $0 {start|stop|status}"; exit 2 ;;
+esac

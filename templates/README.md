@@ -23,16 +23,18 @@
 | `@PREFIX@` | 配置变量前缀（大写） | `MYAPP` → `MYAPP_PORT` |
 | `@MODE@` | `entry`（解释器+脚本）/ `binary`（包内自带可执行文件） | `entry` |
 | `@ENTRY@` | `MODE=entry` 时的入口文件（相对 `target/`） | `dist/server/index.mjs` |
-| `@LAUNCH@` | 拉起进程的完整命令（在 `target/` 下执行） | `exec "$NODE_BIN" "$ENTRY"` |
+| `@RUNTIME_BIN@` | `MODE=entry` 的解释器绝对路径；Node/Python 都行 | `/var/apps/nodejs_v24/target/bin/node` |
+| `@LAUNCH@` | 拉起进程的完整命令（在 `target/` 下执行） | `exec "$RUNTIME_BIN" "$ENTRY"` |
 | `@OWN_BINS@` | 包内自有二进制（相对 `target/`，空格分隔，用于孤儿清扫） | `bin/helper bin/worker` |
 | `@HEALTH_PATH@` | 就绪探测路径；空则退化为端口探测 | `/healthz` |
 | `@DEFAULT_PORT@` | 端口默认值（别用 8080） | `26800` |
 | `TODO(app-env)` | `build_env()` 里追加的应用环境变量（生成后手工补） | `export MYAPP_HOME=...` |
 | `TODO(first-run)` | 首启默认值逻辑（生成后手工补，没有就删） | 调应用自己的 API |
 | `@USER_DATA_HINT@` | 卸载提示里"不删什么"的说明 | `/vol1/@appshare/MyApp/downloads` |
-| `@STATE_PATHS@` | `purge` 要删的相对路径（相对 `PKGVAR`） | `data home tmp config.env` |
+| `@STATE_PATHS@` | `purge` 要删的相对路径（相对 `PKGVAR`，禁止 `..`/绝对路径） | `data home tmp config.env` |
+| `@SAVE_DIRS@` | 权限修正/验收使用的用户数据目录（空格分隔） | `/vol1/@appshare/MyApp/downloads` |
 | `@PKGVAR@` `@SAVE_DIR@` `@PORT@` `@HEALTH@` | 验收脚本用 | `/vol1/@appdata/MyApp` … |
-| `TODO(e2e)` | 验收阶段的端到端用例（生成后手工补，没有就保持 SKIP） | 触发 → 断言产物 |
+| `TODO(e2e)` | 验收阶段的端到端用例（必须补；不补 `accept all` 会 FAIL） | 触发 → 断言产物 |
 
 ## manifest 模板
 

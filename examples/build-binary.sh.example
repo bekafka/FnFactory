@@ -39,13 +39,14 @@ GOOS=linux GOARCH="$ARCH" CGO_ENABLED=0 \
 chmod 755 "$PAYLOAD_DIR/bin/myapp"
 
 # ── 2. 架构自检（一定要做：拿错架构的二进制装到设备上会直接起不来）──────────
-ACTUAL_ARCH=$(file -b "$PAYLOAD_DIR/bin/myapp" | grep -oE 'x86-64|aarch64|ARM aarch64' | head -1)
+FILE_INFO=$(file -b "$PAYLOAD_DIR/bin/myapp" 2>/dev/null || true)
+ACTUAL_ARCH=$(printf '%s\n' "$FILE_INFO" | grep -oE 'x86-64|aarch64|ARM aarch64' | head -1 || true)
 case "$ARCH" in
   amd64) EXPECT="x86-64" ;;
   arm64) EXPECT="aarch64" ;;
 esac
-if ! file -b "$PAYLOAD_DIR/bin/myapp" | grep -q "$EXPECT"; then
-  echo "::error::产物架构不对：期望 $EXPECT，实际 $ACTUAL_ARCH"
+if ! printf '%s\n' "$FILE_INFO" | grep -q "$EXPECT"; then
+  echo "::error::产物架构不对：期望 $EXPECT，实际 ${ACTUAL_ARCH:-未知}"
   exit 1
 fi
 echo "[build-binary] ✓ 架构自检通过（$EXPECT）"

@@ -2,7 +2,7 @@
 # ==============================================================================
 # @APPNAME@ · 生命周期入口（start / stop / status）
 #
-# 由 fpk-factory 规范模板生成：specs/lifecycle.md
+# 由 FnFactory 规范模板生成：specs/lifecycle.md
 # 占位符由 tools/scaffold-lifecycle.sh 替换；替换后请过一遍「应用定制区」。
 #
 # 这个骨架解决的都是飞牛上实测踩过的坑，别随手删：
@@ -24,7 +24,9 @@ LAUNCH_CMD='@LAUNCH@'             # 真正拉起进程的命令（在 APPDEST �
 OWN_BINS="@OWN_BINS@"             # 包内自有二进制（相对 APPDEST，空格分隔），孤儿清理按 exe 精确匹配
 HEALTH_PATH="@HEALTH_PATH@"       # 就绪探测路径，例如 /healthz；空 = 只探测端口
 DEFAULT_PORT="@DEFAULT_PORT@"     # 端口默认值（不要用 8080/8000 这类热门端口）
-NODE_BIN="/var/apps/nodejs_v24/target/bin/node"   # MODE=binary 时忽略
+RUNTIME_BIN="@RUNTIME_BIN@"       # entry 模式的解释器；scaffold 默认 nodejs_v24 的 node，Python 应用传 python3
+# 兼容旧模板变量名：MODE=binary 时忽略
+NODE_BIN="$RUNTIME_BIN"
 
 # ── 路径 ─────────────────────────────────────────────────────────────────────
 PKGVAR="${TRIM_PKGVAR:-/var/apps/$APPNAME/var}"
@@ -32,6 +34,7 @@ APPDEST="${TRIM_APPDEST:-/var/apps/$APPNAME/target}"
 LOG_FILE="$PKGVAR/info.log"
 PID_FILE="$PKGVAR/app.pid"
 PERM_FIX_PID="$PKGVAR/perm-fix.pid"
+PERM_SCAN_STAMP="$PKGVAR/.perm-scan"
 CONF="$PKGVAR/config.env"
 READY_TIMEOUT=45
 
@@ -41,37 +44,63 @@ log_msg() { printf '%s - %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" >> "$LOG_FILE
 resolve_path() { readlink -f "$1" 2>/dev/null || printf '%s' "$1"; }
 check_process() { [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null; }
 
-# 读配置：先给默认值，再让 config.env 覆盖（安装/设置回调写的就是它）
+# 读配置：先 source config.env，再逐项取 PREFIX_* 默认值。
+# 注意：不能先取默认值再 source，也不能复用同一个局部变量名去间接展开，
+# 否则 PREFIX_PORT 会拿到别的键（历史上就是这样把 PORT 读成 MAX_OLD_SPACE=512 的）。
 load_config() {
-  local v
-  v="${PREFIX}_PORT";     PORT="${!v:-$DEFAULT_PORT}"
-  v="${PREFIX}_FIX_PERMISSIONS"; FIX_PERMISSIONS="${!v:-1}"
-  v="${PREFIX}_PERM_FIX_INTERVAL"; PERM_FIX_INTERVAL="${!v:-30}"
-  v="${PREFIX}_SAVE_DIRS"; SAVE_DIRS="${!v:-}"
-  v="${PREFIX}_LOG_MAX_BYTES"; LOG_MAX_BYTES="${!v:-5242880}"
-  v="${PREFIX}_MAX_OLD_SPACE"; MAX_OLD_SPACE="${!v:-512}"
+  local key var
+  PORT="$DEFAULT_PORT"
+  FIX_PERMISSIONS=1
+  PERM_FIX_INTERVAL=30
+  SAVE_DIRS=""
+  LOG_MAX_BYTES=5242880
+  MAX_OLD_SPACE=512
+
   if [ -r "$CONF" ]; then
     # shellcheck disable=SC1090
     . "$CONF"
-    PORT="${!v:-$PORT}"   # config.env 里可能没写全，保留上面的默认
   else
     log_msg "缺少 $CONF（install_callback 没跑？），使用内置默认值"
   fi
+
+  for key in PORT FIX_PERMISSIONS PERM_FIX_INTERVAL SAVE_DIRS LOG_MAX_BYTES MAX_OLD_SPACE; do
+    var="${PREFIX}_${key}"
+    if [ -n "${!var:-}" ]; then
+      printf -v "$key" '%s' "${!var}"
+    fi
+  done
+
+  case "${PORT:-}" in
+    ''|*[!0-9]*) log_msg "非法端口 ${PORT:-（空）}，回退到 $DEFAULT_PORT"; PORT="$DEFAULT_PORT" ;;
+  esac
+  case "${PERM_FIX_INTERVAL:-}" in
+    ''|*[!0-9]*) PERM_FIX_INTERVAL=30 ;;
+  esac
+  [ "${PERM_FIX_INTERVAL:-30}" -gt 0 ] 2>/dev/null || PERM_FIX_INTERVAL=30
 }
 
 # 应用自己的环境变量都放这里（PATH / DATA_DIR / HOME / TMPDIR …）
 build_env() {
   load_config
-  export PATH="/var/apps/nodejs_v24/target/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  local runtime_dir=""
+  [ -n "${RUNTIME_BIN:-}" ] && runtime_dir="$(dirname "$RUNTIME_BIN")"
+  export PATH="${runtime_dir:+$runtime_dir:}/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
   export HOME="$PKGVAR/home"
   export TMPDIR="$PKGVAR/tmp"
   export "@PREFIX@_DATA_DIR=$PKGVAR/data"
+  if [ "$MODE" = "entry" ] && [ "${RUNTIME_BIN##*/}" = "node" ]; then
+    export NODE_OPTIONS="${NODE_OPTIONS:-} --max-old-space-size=${MAX_OLD_SPACE:-512}"
+  fi
   # TODO(app-env): 在这里追加应用需要的 export（数据目录、HOME、端口变量…）
 }
 
 mkdir_runtime_dirs() {
   mkdir -p "$PKGVAR/data" "$PKGVAR/tmp" "$PKGVAR/home" 2>/dev/null || true
-  [ -n "${SAVE_DIRS:-}" ] && mkdir -p $SAVE_DIRS 2>/dev/null || true
+  if [ -n "${SAVE_DIRS:-}" ]; then
+    local -a save_dirs=()
+    read -r -a save_dirs <<< "$SAVE_DIRS"
+    [ "${#save_dirs[@]}" -gt 0 ] && mkdir -p "${save_dirs[@]}" 2>/dev/null || true
+  fi
 }
 
 # ── 身份校验：exe 归一化后等于预期，且（entry 模式）cwd 与入口都对得上 ─────────
@@ -85,7 +114,7 @@ check_identity() {
     cmd="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)"
     case "$cmd" in *"$APPDEST"*) return 0 ;; *) return 1 ;; esac
   else
-    want="$(resolve_path "$NODE_BIN")"
+    want="$(resolve_path "$RUNTIME_BIN")"
     [ -n "$exe" ] && [ "$exe" = "$want" ] || return 1
     cwd="$(resolve_path "$(readlink "/proc/$pid/cwd" 2>/dev/null)")"
     [ "$cwd" = "$(resolve_path "$APPDEST")" ] || return 1
@@ -99,6 +128,7 @@ find_orphans() {
   local pid exe want own
   for pid in $(ls /proc 2>/dev/null | grep -E '^[0-9]+$'); do
     [ "$pid" = "$$" ] && continue
+    [ "$(stat -c %u "/proc/$pid" 2>/dev/null)" = "$(id -u)" ] || continue
     [ -r "/proc/$pid/exe" ] || continue
     exe="$(resolve_path "$(readlink "/proc/$pid/exe" 2>/dev/null)")"
     [ -n "$exe" ] || continue
@@ -107,13 +137,16 @@ find_orphans() {
         [ "$exe" = "$(resolve_path "$APPDEST/$own")" ] && { printf '%s\n' "$pid"; break; }
       done
     else
-      [ "$exe" = "$(resolve_path "$NODE_BIN")" ] || continue
+      [ "$exe" = "$(resolve_path "$RUNTIME_BIN")" ] || continue
       check_identity "$pid" && printf '%s\n' "$pid"
     fi
   done
 }
 
-port_in_use() { ss -ltn 2>/dev/null | grep -qE "[:.]$1[[:space:]]"; }
+port_in_use() {
+  case "${1:-}" in ''|*[!0-9]*) return 1 ;; esac
+  ss -ltn 2>/dev/null | grep -qE "[:.]$1[[:space:]]"
+}
 
 wait_ready() {
   local pid="$1" waited=0
@@ -148,12 +181,21 @@ rotate_logs() {
 fix_permissions_once() {
   [ "${FIX_PERMISSIONS:-1}" = "1" ] || return 0
   [ -n "${SAVE_DIRS:-}" ] || return 0
-  local d
-  for d in $SAVE_DIRS; do
+  local d scanned=0
+  local -a dirs=()
+  read -r -a dirs <<< "$SAVE_DIRS"
+
+  # 第一次全量扫一遍；之后只处理比上次扫描更新的文件，避免每 30s 遍历几万文件。
+  local -a newer=()
+  [ -f "$PERM_SCAN_STAMP" ] && newer=(-newer "$PERM_SCAN_STAMP")
+
+  for d in "${dirs[@]}"; do
     [ -d "$d" ] || continue
-    find "$d" -xdev -type d ! -perm -o+rx -exec chmod 0755 {} + 2>/dev/null || true
-    find "$d" -xdev -type f ! -perm -o+r -exec chmod 0644 {} + 2>/dev/null || true
+    scanned=1
+    find "$d" -xdev "${newer[@]}" -type d ! -perm -o+rx -exec chmod 0755 {} + 2>/dev/null || true
+    find "$d" -xdev "${newer[@]}" -type f ! -perm -o+r -exec chmod 0644 {} + 2>/dev/null || true
   done
+  [ "$scanned" = "1" ] && : > "$PERM_SCAN_STAMP" 2>/dev/null || true
 }
 
 start_permission_fixer() {
@@ -207,11 +249,12 @@ start_process() {
     [ -x "$APPDEST/${OWN_BINS%% *}" ] || { log_msg "找不到可执行文件 $APPDEST/${OWN_BINS%% *}"; return 1; }
   else
     [ -f "$APPDEST/$ENTRY" ] || { log_msg "找不到入口 $APPDEST/$ENTRY"; return 1; }
-    [ -x "$NODE_BIN" ] || { log_msg "找不到运行时 $NODE_BIN"; return 1; }
+    [ -x "$RUNTIME_BIN" ] || { log_msg "找不到运行时 $RUNTIME_BIN"; return 1; }
   fi
 
   if port_in_use "$PORT"; then
-    log_msg "端口 $PORT 已被占用；启动会失败。占用者：$(ss -ltnp 2>/dev/null | grep -E "[:.]$PORT[[:space:]]" | head -n 1)"
+    log_msg "端口 $PORT 已被占用，拒绝启动。占用者：$(ss -ltnp 2>/dev/null | grep -E "[:.]$PORT[[:space:]]" | head -n 1)"
+    return 1
   fi
 
   (

@@ -1,0 +1,13 @@
+[
+  {
+    "stepTitle": "Fixture 端口",
+    "items": [
+      {
+        "type": "text",
+        "field": "wizard_port",
+        "label": "端口",
+        "initValue": "26999"
+      }
+    ]
+  }
+]

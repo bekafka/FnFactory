@@ -8,7 +8,7 @@
 
 ## 1. 必须提供卸载方式选择
 
-飞牛官方契约里写着（`references/official-docs-live.md` §卸载流程）：
+飞牛官方契约里写着（见 [fnOS manifest 文档](https://developer.fnnas.com/docs/core-concepts/manifest/) 的卸载流程）：
 
 > 卸载逻辑应尊重用户数据。如果应用允许用户选择保留或删除数据，可在 `wizard/uninstall` 中收集选择。
 

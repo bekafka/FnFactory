@@ -1,0 +1,21 @@
+#!/bin/bash
+set -u
+PKGVAR="${TRIM_PKGVAR:-}"
+MODE="${wizard_uninstall_mode:-keep}"
+log() { printf '%s\n' "$1" >> "${TRIM_TEMP_LOGFILE:-/dev/null}" 2>/dev/null || true; }
+case "$MODE" in
+  purge)
+    case "$PKGVAR" in
+      /vol1/@appdata/*)
+        for rel in data home tmp config.env; do
+          case "$rel" in ""|/*|.|..|*..*) continue ;; esac
+          rm -rf "${PKGVAR:?}/$rel" 2>/dev/null || true
+        done
+        log "purged"
+        ;;
+      *) log "skip: $PKGVAR" ;;
+    esac
+    ;;
+  *) log "keep" ;;
+esac
+exit 0

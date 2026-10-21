@@ -26,12 +26,15 @@ echo "[build-runtime-dep] arch=$ARCH platform=$PLATFORM version=$VERSION"
 # 在 CI 的 ubuntu runner 上装依赖并构建；产物是纯 JS，与架构无关，
 # 所以两个架构可以跑同一份产物（除非你有原生模块 .node）。
 if [ -f package.json ]; then
+  [ -f package-lock.json ] || { echo "::error::Node 应用需要 package-lock.json（npm ci）"; exit 1; }
   npm ci
   npm run build --if-present
 
+  DIST_DIR="${DIST_DIR:-dist}"
+  [ -d "$DIST_DIR" ] || { echo "::error::构建产物目录不存在：$DIST_DIR（可用 DIST_DIR 覆盖）"; exit 1; }
   mkdir -p "$PAYLOAD_DIR/server"
-  cp -r dist/. "$PAYLOAD_DIR/server/" 2>/dev/null || cp -r . "$PAYLOAD_DIR/server/"
-  cp package.json "$PAYLOAD_DIR/server/" 2>/dev/null || true
+  cp -r "$DIST_DIR"/. "$PAYLOAD_DIR/server/"
+  cp package.json "$PAYLOAD_DIR/server/"
 
   # 生产依赖：要与构建机架构一致的话，在矩阵里各自跑一次就行（本脚本已经如此）
   if [ -d node_modules ]; then
@@ -48,9 +51,11 @@ if [ -f requirements.txt ]; then
   # 这里只搬运源码与依赖清单，真正的依赖安装在 cmd/install_callback 里做：
   #   export PATH=/var/apps/python312/target/bin:$PATH
   #   python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+  PY_SRC="${PY_SRC:-app}"
+  [ -d "$PY_SRC" ] || { echo "::error::Python 源码目录不存在：$PY_SRC（可用 PY_SRC 覆盖）"; exit 1; }
   mkdir -p "$PAYLOAD_DIR/server"
-  cp -r app/. "$PAYLOAD_DIR/server/" 2>/dev/null || true
-  cp requirements.txt "$PAYLOAD_DIR/server/" 2>/dev/null || true
+  cp -r "$PY_SRC"/. "$PAYLOAD_DIR/server/"
+  cp requirements.txt "$PAYLOAD_DIR/server/"
 fi
 
 # ── 静态前端（可选）────────────────────────────────────────────────────────

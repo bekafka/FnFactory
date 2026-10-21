@@ -1,2 +1,6 @@
 build_workspace/
 *.fpk
+
+__pycache__/
+*.pyc
+.review/

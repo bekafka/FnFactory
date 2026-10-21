@@ -1,0 +1,19 @@
+# FnFactory regression fixture — must pass lint-package.sh
+appname               = Fixture
+version               = ${VERSION}
+display_name          = Fixture
+desc                  = "<p>Fixture package for FnFactory tests.</p><p>源作者：<a href='https://github.com/example/fixture'>example</a></p>"
+platform              = ${PLATFORM}
+source                = thirdparty
+maintainer            = bekafka
+maintainer_url        = https://github.com/bekafka/FnDepot
+distributor           = bekafka
+distributor_url       = https://github.com/bekafka/FnDepot
+source_author         = example
+source_author_url     = https://github.com/example/fixture
+desktop_uidir         = ui
+desktop_applaunchname = Fixture.main
+ctl_stop              = true
+checkport             = false
+disable_authorization_path = false
+changelog             = ${CHANGELOG}

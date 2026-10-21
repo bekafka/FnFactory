@@ -23,4 +23,5 @@ desktop_applaunchname = @APPNAME@.main
 ctl_stop              = true
 checkport             = false
 disable_authorization_path = false
+# changelog 必须单行（流水线会把多行折成 " · "；fnpack 不认多行值）
 changelog             = ${CHANGELOG}

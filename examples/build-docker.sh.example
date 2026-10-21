@@ -45,7 +45,14 @@ if [ -n "${IMAGES:-}" ] && command -v docker >/dev/null 2>&1; then
     docker manifest inspect "$img" >/tmp/manifest.json 2>/dev/null || {
       echo "::warning::取不到 $img 的 manifest，跳过架构校验"; continue; }
     WANT="amd64"; [ "$ARCH" = "arm64" ] && WANT="arm64"
-    if grep -q "\"architecture\": \"$WANT\"" /tmp/manifest.json; then
+    # docker manifest inspect 的 JSON 可能缩进/紧凑，且单 arch 与 manifest list 结构不同；
+    # 不要用 grep 匹配带空格的字符串，统一用 jq。
+    if jq -e --arg a "$WANT" '
+        if has("manifests") then
+          any(.manifests[]?.platform.architecture; . == $a)
+        else
+          .architecture == $a
+        end' /tmp/manifest.json >/dev/null 2>&1; then
       echo "[build-docker] ✓ $img 含 $WANT"
     else
       echo "::error::$img 没有 $WANT 变体，该架构装上去会拉取失败"

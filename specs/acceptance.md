@@ -24,6 +24,11 @@
 | 5 生命周期 | stop → 端口释放、无残留进程 → start → 就绪 | 孤儿进程、pid 身份判断、状态文件 |
 | 6 运维项 | 目录/文件权限、日志轮转、内存参数、卸载向导 | 规范没落实 |
 
+> `templates/tests/accept.sh` 的鉴权阶段默认 `AUTH_MODE=auto`：无鉴权应用必须在
+> `config.env` 显式写 `AUTH_MODE=none`；有鉴权应用用 `AUTH_HEADER` 提供正例请求头。
+> 不要为了让 `accept all` 变绿而把 `AUTH_MODE` 设成 `none`——那等于跳过鉴权验证。
+
+
 ## 硬性要求
 
 1. **用真机、经网关/局域网 IP 各验一次**（只测 127.0.0.1 会漏掉绑定地址问题）。
