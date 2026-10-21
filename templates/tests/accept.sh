@@ -90,7 +90,7 @@ stage_lifecycle() {
   appcenter-cli stop "$APPNAME" >/dev/null 2>&1
   for i in $(seq 1 20); do [ "$(appcenter-cli status "$APPNAME" 2>/dev/null)" = "stopped" ] && break; sleep 1; done
   [ "$(appcenter-cli status "$APPNAME" 2>/dev/null)" = "stopped" ] && ok "stop 后 status = stopped" || bad "stop 后仍不是 stopped"
-  ss -ltn 2>/dev/null | grep -qE "[:.]$PORT[[:space:]]" && bad "端口 $PORT 未释放" || ok "端口 $PORT 已释放"
+  ss -ltn 2>/dev/null | grep -qE "[:.]${PORT}[[:space:]]" && bad "端口 $PORT 未释放" || ok "端口 $PORT 已释放"
   left="$(for p in $(ls /proc | grep -E '^[0-9]+$'); do
             e="$(readlink -f "/proc/$p/exe" 2>/dev/null)"
             c="$(readlink -f "/proc/$p/cwd" 2>/dev/null)"

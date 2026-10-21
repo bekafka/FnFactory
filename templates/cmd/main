@@ -151,7 +151,7 @@ find_orphans() {
 
 port_in_use() {
   case "${1:-}" in ''|*[!0-9]*) return 1 ;; esac
-  ss -ltn 2>/dev/null | grep -qE "[:.]$1[[:space:]]"
+  ss -ltn 2>/dev/null | grep -qE "[:.]${1}[[:space:]]"
 }
 
 wait_ready() {
@@ -259,7 +259,7 @@ start_process() {
   fi
 
   if port_in_use "$PORT"; then
-    log_msg "端口 $PORT 已被占用，拒绝启动。占用者：$(ss -ltnp 2>/dev/null | grep -E "[:.]$PORT[[:space:]]" | head -n 1)"
+    log_msg "端口 $PORT 已被占用，拒绝启动。占用者：$(ss -ltnp 2>/dev/null | grep -E "[:.]${PORT}[[:space:]]" | head -n 1)"
     return 1
   fi
 
