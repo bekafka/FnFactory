@@ -19,7 +19,7 @@
            ├── packaging/build.sh      ├── templates/ 可继承模板
            ├── tests/                  └── tools/     fnpack + scaffold + lint
            └── README.md
-                  │  uses: FnFactory/.github/workflows/_build-fpk.yml@main
+                  │  uses: FnFactory/.github/workflows/_build-fpk.yml@v1
                   ▼
         Release（.fpk 资产发布在 FnDepot 自己仓库里）
 ```
