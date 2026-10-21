@@ -114,6 +114,11 @@ on:
         required: false
         type: boolean
         default: true
+      glibc_max:
+        description: 'payload 内 ELF 允许的最高 GLIBC 版本；fnOS 1.x 实测 2.36'
+        required: false
+        type: string
+        default: '2.36'
     outputs:
       tag:
         description: '本次发布使用的 tag'
@@ -264,6 +269,14 @@ jobs:
           find "$PAYLOAD_DIR" -type f | head -40 || true
           echo "--- payload 大小 ---"
           du -sh "$PAYLOAD_DIR" || true
+
+      - name: 检查 payload 的 glibc 基线
+        env:
+          GLIBC_MAX: ${{ inputs.glibc_max }}
+          PAYLOAD_DIR: ${{ github.workspace }}/build_workspace/${{ inputs.app_key }}/app
+        run: |
+          set -euo pipefail
+          bash .factory/tools/check-glibc.sh "$GLIBC_MAX" "$PAYLOAD_DIR"
 
       - name: 上传 payload
         uses: actions/upload-artifact@v4

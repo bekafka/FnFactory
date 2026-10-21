@@ -160,7 +160,22 @@ else
   bad "accept.sh 缺少 e2e 未实现标记"
 fi
 
-# ── 6. manifest 渲染：多行 changelog + fnpack 真打包 ─────────────────────────
+# ── 6. glibc 基线检查 ─────────────────────────────────────────────────────────
+section "glibc 基线"
+mkdir -p "$TMP/glibc-payload"
+cp /bin/true "$TMP/glibc-payload/true"
+if bash "$ROOT/tools/check-glibc.sh" 2.0 "$TMP/glibc-payload" >/dev/null 2>&1; then
+  bad "glibc 2.0 的基线应失败"
+else
+  ok "glibc 基线能拦截高于目标版本的 ELF"
+fi
+if bash "$ROOT/tools/check-glibc.sh" 99 "$TMP/glibc-payload" >/dev/null 2>&1; then
+  ok "glibc 基线放行低于目标版本的 ELF"
+else
+  bad "glibc 基线误杀了低版本 ELF"
+fi
+
+# ── 7. manifest 渲染：多行 changelog + fnpack 真打包 ─────────────────────────
 section "manifest / fnpack"
 mkdir -p "$TMP/render"
 cp -r "$ROOT/tests/fixtures/Fixture/package" "$TMP/render/Fixture"

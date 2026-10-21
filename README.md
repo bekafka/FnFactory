@@ -200,15 +200,22 @@ bash tests/run.sh          # 本地：shell/YAML/JSON + lint 正反例 + scaffol
 
 ---
 
-## 兼容性基线（发版前请按目标设备实测）
+## 兼容性基线（2026-10-21 真机确认）
 
-| 项 | 当前假设 | 需要确认 |
+| 项 | 实测值 | 状态 |
 |---|---|---|
-| fnOS | 1.x / fpk V2 | 目标设备的具体小版本 |
-| 构建 runner | `ubuntu-24.04`，glibc 2.39 | 若 fnOS 是 Debian 12（glibc 2.36），带 CGO/原生模块的产物可能报 `GLIBC_2.39 not found`；纯静态 Go 无碍。必要时改 `debian:12` 容器构建 |
-| arm64 runner | `ubuntu-24.04-arm` | 取决于 GitHub 计划/仓库可见性；不可用时改单架构或自托管 |
-| Node | 默认 `/var/apps/nodejs_v24/target/bin/node`，可用 `--runtime-bin` 覆盖 | fnOS 升级 Node 大版本时同步改 |
-| Python | `--mode entry --runtime-bin /var/apps/python312/target/bin/python3` | 需要 Python 官方运行时已安装 |
+| fnOS | Debian GNU/Linux 12.12 (bookworm)，kernel `6.18.18.c1111-trim`，aarch64 | ✅ 已确认 |
+| glibc | **2.36**（`libc6 2.36-9+deb12u13`） | ✅ 已确认 |
+| 设备 fnpack | `/usr/local/bin/fnpack` **1.2.4** | ✅ 已确认 |
+| Node | v24.13.1 | ✅ 已确认 |
+| Python | 3.12.13 | ✅ 已确认 |
+| 构建 runner | `ubuntu-24.04` 自带 glibc 2.39 | ⚠️ 需用 `tools/check-glibc.sh 2.36 <payload>` 卡住；带 CGO/原生模块建议 Debian 12 / Ubuntu 22.04 |
+| arm64 runner | `ubuntu-24.04-arm` | ⚠️ 取决于 GitHub 计划/仓库可见性 |
+
+`_build-fpk.yml` 现在会在 build job 里对 payload 跑 `tools/check-glibc.sh "$GLIBC_MAX"`，
+默认 `GLIBC_MAX=2.36`。纯静态 Go（`CGO_ENABLED=0`）没有动态 GLIBC 依赖，会显示
+`最高 GLIBC_（无动态 ELF）`；Node 原生 `.node` 若用了 2.39 的符号会直接失败，避免把
+设备装不上的包发出去。
 
 > 这一节不是“保证”，是把隐含假设显式化；换目标机型时先跑 `tests/run.sh` 和真机 `accept.sh`。
 
