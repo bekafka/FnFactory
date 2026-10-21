@@ -72,6 +72,8 @@ load_config() {
 
   case "${PORT:-}" in
     ''|*[!0-9]*) log_msg "非法端口 ${PORT:-（空）}，回退到 $DEFAULT_PORT"; PORT="$DEFAULT_PORT" ;;
+    *) [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ] || {
+         log_msg "端口越界 ${PORT}，回退到 $DEFAULT_PORT"; PORT="$DEFAULT_PORT"; } ;;
   esac
   case "${PERM_FIX_INTERVAL:-}" in
     ''|*[!0-9]*) PERM_FIX_INTERVAL=30 ;;

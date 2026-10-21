@@ -88,7 +88,7 @@ jobs:
           repository: ${{ inputs.fndepot_repo }}
           token: ${{ secrets.FNDEPOT_TOKEN }}
           path: fndepot
-          fetch-depth: 1
+          fetch-depth: 0
           persist-credentials: true
 
       - name: 配置 git 身份
