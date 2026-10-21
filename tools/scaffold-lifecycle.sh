@@ -71,6 +71,7 @@ else
   [ -n "$ENTRY" ] && [ "$ENTRY" != "." ] || {
     echo "--mode entry 必须给 --entry（例如 dist/server/index.mjs）" >&2; exit 2; }
   [ -n "$RUNTIME_BIN" ] || RUNTIME_BIN="/var/apps/nodejs_v24/target/bin/node"
+  case "$RUNTIME_BIN" in /*) ;; *) echo "--runtime-bin 必须是绝对路径：$RUNTIME_BIN" >&2; exit 2 ;; esac
   [ -n "$LAUNCH" ] || LAUNCH='exec "$RUNTIME_BIN" "$ENTRY"'
 fi
 [ -n "$OWN_BINS" ] || OWN_BINS="."
