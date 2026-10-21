@@ -79,6 +79,10 @@ load_config() {
     ''|*[!0-9]*) PERM_FIX_INTERVAL=30 ;;
   esac
   [ "${PERM_FIX_INTERVAL:-30}" -gt 0 ] 2>/dev/null || PERM_FIX_INTERVAL=30
+  case "${MAX_OLD_SPACE:-}" in
+    ''|*[!0-9]*) MAX_OLD_SPACE=512 ;;
+  esac
+  [ "${MAX_OLD_SPACE:-512}" -gt 0 ] 2>/dev/null || MAX_OLD_SPACE=512
 }
 
 # 应用自己的环境变量都放这里（PATH / DATA_DIR / HOME / TMPDIR …）
