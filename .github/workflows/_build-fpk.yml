@@ -105,7 +105,7 @@ on:
         type: boolean
         default: false
       go_version:
-        description: 'setup-go 的版本；默认 stable，建议改为 go.mod 的版本'
+        description: 'setup-go 版本。默认 stable 会随 runner 漂移，务必钉到已修复标准库漏洞的版本（如 1.27.3）'
         required: false
         type: string
         default: 'stable'

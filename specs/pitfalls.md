@@ -152,3 +152,29 @@ CLI、系统内部调用、补全触发卸载时都不会带 `wizard_*`。
 
 Release tag 必须带应用名前缀：`<App>-v<version>`（如 `Motrix-v2.0.0-beta.49`）。
 否则两个应用同版本号会撞 tag，资产互相覆盖。资产名保持 `<App>-<version>-<arch>.fpk`。
+
+## 17. Go 标准库漏洞只能靠「换工具链重编」，改依赖没用
+
+`govulncheck` 把漏洞分成**标准库（stdlib）**和**模块依赖**两类。标准库那部分
+（如 2026-10-21 的 `crypto/x509` 中间证书黑名单 `GO-2026-6809` / `CVE-2026-111943`，
+修在 go1.26.10 / go1.27.3）**无论怎么 `go get -u` 都清不掉**，因为代码被编进二进制里了；
+唯一的办法是用已修复的 Go 重新编译。
+
+复现（Magpie 0.1.1299 / 0.1.1315 的线上二进制都用 go1.27.3 之前的工具链编）：
+
+```bash
+# 二进制级扫描：能直接看出 stdlib 漏洞和编译时用的 Go 版本
+govulncheck -mode=binary path/to/bin/app   | grep -E 'Found in: (crypto|net|html|mime)/|go1\.' 
+go version -m path/to/bin/app | head -1    # go1.27.2 / go1.26.4 → 带洞
+```
+
+应用层怎么做（见 `FnDepot/apps/Magpie/packaging/build.sh`）：
+
+- 构建脚本里 **钉死 `GOTOOLCHAIN=go1.27.3`**，不再 `GOTOOLCHAIN=auto` 跟随 `go.mod` 的旧 `go` 指令；
+- 编译前跑 `govulncheck ./...`（符号级可达性，不会因为未调用模块报警卡构建）当门禁；
+- 编译后 `go version -m` 自证产物所用 Go 版本落在已修复区间，否则拒绝出包；
+- CI 的 `setup-go` 也要显式传 `go_version: '1.27.3'`——默认为 `stable`，会随 runner 漂移，
+  某天上游把 `stable` 挪回旧线或镜像缓存命中旧版，就会悄悄退回有洞的产物。
+
+**预编译载体（直接取上游 release 二进制）的应用修不了这个**：上游不重编，你就只能等。
+要么接受风险并在报告里写清，要么改成源码构建（会多引入 node/pnpm 前端链）。
