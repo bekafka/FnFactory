@@ -47,7 +47,7 @@ on:
         required: true
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: fndepot-index-${{ inputs.fndepot_repo }}
@@ -59,7 +59,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
-      contents: read
+      contents: write
     steps:
       - name: 校验输入
         env:
