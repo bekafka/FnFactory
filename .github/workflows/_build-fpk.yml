@@ -281,7 +281,12 @@ jobs:
       - name: 上传 payload
         uses: actions/upload-artifact@v4
         with:
-          name: payload-${{ matrix.platform }}-${{ matrix.arch }}
+          # 名字必须带 app_key：调用方可能在一个 run 里矩阵化跑多个应用
+          # （FnDepot 的 auto-release.yml 就是这样）。artifact 名在 run 内全局唯一，
+          # 只写 payload-<platform>-<arch> 会让两个应用的 payload 同名并存，
+          # 下游 package job 的 pattern 匹配会把别的应用的 payload 一起下下来，
+          # 用本应用的模板去装它 → "manifest appname='X' != app_key='Y'"。
+          name: payload-${{ inputs.app_key }}-${{ matrix.platform }}-${{ matrix.arch }}
           path: build_workspace/${{ inputs.app_key }}
           if-no-files-found: error
 
@@ -305,9 +310,13 @@ jobs:
       - name: 下载所有 payload
         uses: actions/download-artifact@v4
         with:
-          pattern: payload-*
+          # 只取本应用的 payload。一个 run 里可能同时构建多个应用
+          # （FnDepot 的 auto-release.yml 矩阵化调用），用 payload-* 会把
+          # 别的应用的 payload 也下下来，导致用错模板打包。
+          pattern: payload-${{ inputs.app_key }}-*
           path: payloads
           merge-multiple: false
+          if-no-files-found: error
 
       - name: 准备 fnpack 工具（带 sha256 校验）
         env:
@@ -336,12 +345,17 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
-          dirs=(payloads/payload-*)
-          [ "${#dirs[@]}" -gt 0 ] || { echo "::error::没有下载到 payload"; exit 1; }
+          # 目录名形如 payload-<app_key>-<platform>-<arch>（app_key 由上游 job 带入）。
+          dirs=(payloads/payload-"$APP_KEY"-*)
+          [ "${#dirs[@]}" -gt 0 ] || {
+            echo "::error::没有下载到 payload（期望 payloads/payload-${APP_KEY}-*）"; exit 1; }
 
           for dir in "${dirs[@]}"; do
             name="$(basename "$dir")"
-            rest="${name#payload-}"
+            rest="${name#payload-"$APP_KEY"-}"
+            if [ "$rest" = "$name" ]; then
+              echo "::error::artifact 名不含应用前缀 $APP_KEY：$name"; exit 1
+            fi
             platform="${rest%%-*}"
             arch="${rest#*-}"
 
@@ -378,7 +392,8 @@ jobs:
       - name: 上传 FPK
         uses: actions/upload-artifact@v4
         with:
-          name: fpk-all
+          # 同样要带 app_key：一个 run 里多个应用时 fpk-all 会重名冲突。
+          name: fpk-${{ inputs.app_key }}
           path: '*.fpk'
           if-no-files-found: error
 
@@ -402,9 +417,11 @@ jobs:
       - name: 下载所有架构的 FPK
         uses: actions/download-artifact@v4
         with:
-          pattern: fpk-*
+          # 只取本应用的 FPK，避免多应用同 run 时把别人的包也发进本应用的 Release。
+          pattern: fpk-${{ inputs.app_key }}
           merge-multiple: true
           path: dist
+          if-no-files-found: error
 
       - name: 确定 tag
         id: tag
