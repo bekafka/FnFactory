@@ -239,7 +239,7 @@ jobs:
 
       - name: 准备 Go 工具链（应用声明需要时）
         if: inputs.needs_go || hashFiles(format('apps/{0}/packaging/needs-go', inputs.app_key)) != ''
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version: ${{ inputs.go_version }}
           cache: ${{ inputs.go_cache }}
