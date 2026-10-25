@@ -316,7 +316,8 @@ jobs:
           pattern: payload-${{ inputs.app_key }}-*
           path: payloads
           merge-multiple: false
-          if-no-files-found: error
+          # 注意：download-artifact 没有 if-no-files-found（那是 upload-artifact 的），
+          # 传了会被忽略并报 "Unexpected input"。空目录的保护放在下游「打包所有架构」。
 
       - name: 准备 fnpack 工具（带 sha256 校验）
         env:
@@ -421,7 +422,8 @@ jobs:
           pattern: fpk-${{ inputs.app_key }}
           merge-multiple: true
           path: dist
-          if-no-files-found: error
+          # 同上：download-artifact 不支持 if-no-files-found；
+          # 空 dist 由下游「创建/更新 Release」里的 ls + [ -e "$f" ] 拦住。
 
       - name: 确定 tag
         id: tag
