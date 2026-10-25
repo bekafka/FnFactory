@@ -308,7 +308,7 @@ jobs:
           persist-credentials: false
 
       - name: 下载所有 payload
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           # 只取本应用的 payload。一个 run 里可能同时构建多个应用
           # （FnDepot 的 auto-release.yml 矩阵化调用），用 payload-* 会把
@@ -415,7 +415,7 @@ jobs:
           persist-credentials: false
 
       - name: 下载所有架构的 FPK
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           # 只取本应用的 FPK，避免多应用同 run 时把别人的包也发进本应用的 Release。
           pattern: fpk-${{ inputs.app_key }}
