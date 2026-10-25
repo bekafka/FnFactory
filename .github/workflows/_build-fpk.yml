@@ -279,7 +279,7 @@ jobs:
           bash .factory/tools/check-glibc.sh "$GLIBC_MAX" "$PAYLOAD_DIR"
 
       - name: 上传 payload
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           # 名字必须带 app_key：调用方可能在一个 run 里矩阵化跑多个应用
           # （FnDepot 的 auto-release.yml 就是这样）。artifact 名在 run 内全局唯一，
@@ -390,7 +390,7 @@ jobs:
           done
 
       - name: 上传 FPK
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           # 同样要带 app_key：一个 run 里多个应用时 fpk-all 会重名冲突。
           name: fpk-${{ inputs.app_key }}
