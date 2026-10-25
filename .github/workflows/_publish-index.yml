@@ -83,7 +83,7 @@ jobs:
             echo "::error::fndepot_repo 必须是 owner/repo：$FNDEPOT_REPO"; exit 1; }
 
       - name: 检出索引仓库
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ${{ inputs.fndepot_repo }}
           token: ${{ secrets.FNDEPOT_TOKEN }}
