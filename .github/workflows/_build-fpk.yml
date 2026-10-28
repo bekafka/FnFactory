@@ -470,7 +470,7 @@ jobs:
     if: ${{ inputs.publish }}
     permissions:
       contents: write
-    uses: bekafka/FnFactory/.github/workflows/_publish-index.yml@v1
+    uses: bekafka/FnFactory/.github/workflows/_publish-index.yml@v2
     with:
       app_key:      ${{ inputs.app_key }}
       version:      ${{ inputs.version }}
